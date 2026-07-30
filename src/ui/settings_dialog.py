@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.audio.capture import list_audio_devices
+from src.audio.capture import list_microphones, list_loopback_devices, test_device
 from src.config.settings import VALID_LOG_LEVELS, VALID_WHISPER_MODELS, Settings
 
 
@@ -49,35 +49,50 @@ class SettingsDialog(QDialog):
         form.addRow("Whisper model:", self._whisper_cb)
 
         # --- audio devices -------------------------------------------------
-        devices = list_audio_devices()
-        device_choices = ["(default)"] + [
-            f"{d['name']} [{d['index']}]" for d in devices
-        ]
+        mic_devices = list_microphones()
+        loopback_devices = list_loopback_devices()
 
+        def _label(d: dict, working: bool | None = None) -> str:
+            tag = ""
+            if working is True:
+                tag = "  [works]"
+            elif working is False:
+                tag = "  [may not work]"
+            return f"{d['name']}  [{d['host_api']}]{tag}"
+
+        # -- microphone (deduped, best host API) --
         self._mic_cb = QComboBox()
-        self._mic_cb.addItems(device_choices)
+        self._mic_cb.addItem("(system default)")
+        self._mic_indices: list[int | None] = [None]
+        for d in mic_devices:
+            self._mic_cb.addItem(_label(d))
+            self._mic_indices.append(d["index"])
         form.addRow("Microphone:", self._mic_cb)
 
+        # -- system audio (WASAPI loopback, auto-tested) --
         self._sys_cb = QComboBox()
-        self._sys_cb.addItems(device_choices)
+        self._sys_cb.addItem("(none — mic only)")
+        self._sys_indices: list[int | None] = [None]
+        for d in loopback_devices:
+            works = test_device(d["index"], as_loopback=True)
+            self._sys_cb.addItem(_label(d, working=works))
+            self._sys_indices.append(d["index"])
         form.addRow("System audio:", self._sys_cb)
 
         # pre-select current devices
         if settings.microphone_device is not None:
-            idx = next(
-                (i for i, d in enumerate(devices) if d["index"] == settings.microphone_device),
-                None,
-            )
-            if idx is not None:
-                self._mic_cb.setCurrentIndex(idx + 1)  # +1 for "(default)"
+            try:
+                idx = self._mic_indices.index(settings.microphone_device)
+                self._mic_cb.setCurrentIndex(idx)
+            except ValueError:
+                pass
 
         if settings.system_audio_device is not None:
-            idx = next(
-                (i for i, d in enumerate(devices) if d["index"] == settings.system_audio_device),
-                None,
-            )
-            if idx is not None:
-                self._sys_cb.setCurrentIndex(idx + 1)
+            try:
+                idx = self._sys_indices.index(settings.system_audio_device)
+                self._sys_cb.setCurrentIndex(idx)
+            except ValueError:
+                pass
 
         # --- output dir ----------------------------------------------------
         out_row = QHBoxLayout()
@@ -150,17 +165,7 @@ class SettingsDialog(QDialog):
         s.log_file = Path(self._log_file.text())
 
         # audio devices
-        mic_text = self._mic_cb.currentText()
-        if mic_text == "(default)":
-            s.microphone_device = None
-        else:
-            # extract index from format "name [index]"
-            s.microphone_device = int(mic_text.rsplit("[", 1)[1].rstrip("]"))
-
-        sys_text = self._sys_cb.currentText()
-        if sys_text == "(default)":
-            s.system_audio_device = None
-        else:
-            s.system_audio_device = int(sys_text.rsplit("[", 1)[1].rstrip("]"))
+        s.microphone_device = self._mic_indices[self._mic_cb.currentIndex()]
+        s.system_audio_device = self._sys_indices[self._sys_cb.currentIndex()]
 
         self.accept()

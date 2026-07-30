@@ -44,8 +44,7 @@ def main() -> None:
     async def _init() -> None:
         await repo.init()
 
-    with loop:
-        loop.run_until_complete(_init())
+    loop.run_until_complete(_init())
 
     # --- core modules ----------------------------------------------------
     controller = MeetingController(settings, repo)
@@ -56,8 +55,17 @@ def main() -> None:
     window.show()
 
     log.info("Main window shown")
-    with loop:
-        loop.run_forever()
+
+    # --- run -------------------------------------------------------------
+    app.aboutToQuit.connect(loop.stop)
+    loop.run_forever()
+
+    # Suppress known qasync shutdown error on Windows where Qt deletes
+    # signal sources before the event loop fully closes.
+    try:
+        loop.close()
+    except RuntimeError:
+        pass
 
 
 if __name__ == "__main__":

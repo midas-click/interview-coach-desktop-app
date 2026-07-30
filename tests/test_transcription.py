@@ -101,11 +101,11 @@ def test_segment_builder_contiguous_extends_timestamps() -> None:
 # ---------------------------------------------------------------------------
 
 class FakeSegment:
-    def __init__(self, text: str, start: float, end: float, avg_log_prob: float):
+    def __init__(self, text: str, start: float, end: float, avg_logprob: float):
         self.text = text
         self.start = start
         self.end = end
-        self.avg_log_prob = avg_log_prob
+        self.avg_logprob = avg_logprob
 
 
 @pytest.fixture

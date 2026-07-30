@@ -25,7 +25,7 @@ def _value_label() -> QLabel:
     return lbl
 
 
-class Dashboard(QWidget):
+class Dashboard(QFrame):
     """Top-of-window panel with meeting metadata and live status."""
 
     def __init__(self, parent: QWidget | None = None) -> None:

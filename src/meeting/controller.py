@@ -15,6 +15,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from src.audio.manager import AudioManager
+from src.logger.logger import get_logger
 from src.storage.models import TranscriptChunk
 from src.transcription.engine import (
     TranscriptionEngine,
@@ -22,9 +23,9 @@ from src.transcription.engine import (
 )
 from src.transcription.segment_builder import SegmentBuilder
 
-if TYPE_CHECKING:
-    from pathlib import Path
+log = get_logger(__name__)
 
+if TYPE_CHECKING:
     from src.config.settings import Settings
     from src.storage.repository import Repository
 
@@ -111,10 +112,20 @@ class MeetingController:
         if self._meeting_id is None:
             raise RuntimeError("No meeting created — call create_meeting() first")
 
-        if mic_device is not None:
-            self._audio.start_microphone(mic_device)
+        # Always start microphone unless explicitly asked not to.
+        # Passing a device index of None uses the system default.
+        self._audio.start_microphone(mic_device)
         if sys_device is not None:
-            self._audio.start_system_audio(sys_device)
+            try:
+                self._audio.start_system_audio(sys_device)
+            except Exception as exc:
+                log.warning("System audio device %d failed: %s", sys_device, exc)
+
+        log.info(
+            "Starting transcription — mic=%s, sys=%s",
+            "default" if mic_device is None else f"device {mic_device}",
+            "off" if sys_device is None else f"device {sys_device}",
+        )
 
         self._elapsed_offset = 0.0
         self._session_start = time.monotonic()
@@ -128,6 +139,7 @@ class MeetingController:
 
     async def pause(self) -> None:
         """Pause capture and transcription, persist everything."""
+        log.info("Pausing meeting %s", self._meeting_id)
         self._audio.stop_all()
         remaining = self._engine.stop()
         for seg in remaining:
@@ -144,6 +156,7 @@ class MeetingController:
         self._stop_flush_loop()
         await self._repo.pause_meeting(self._meeting_id)  # type: ignore[arg-type]
         self._notify_status("paused")
+        log.info("Meeting %s paused — %d chunks persisted", self._meeting_id, len(chunks))
 
     async def resume(
         self,
@@ -151,12 +164,16 @@ class MeetingController:
         sys_device: int | None = None,
     ) -> None:
         """Resume after a pause, accumulating elapsed time offset."""
+        log.info("Resuming meeting %s", self._meeting_id)
         self._elapsed_offset += time.monotonic() - self._session_start
 
         if mic_device is not None:
             self._audio.start_microphone(mic_device)
         if sys_device is not None:
-            self._audio.start_system_audio(sys_device)
+            try:
+                self._audio.start_system_audio(sys_device)
+            except Exception as exc:
+                log.warning("System audio device %d failed: %s", sys_device, exc)
 
         self._session_start = time.monotonic()
         self._engine.start(self._audio.audio_queue, self._on_transcription_segment)
@@ -169,6 +186,7 @@ class MeetingController:
 
     async def finish(self) -> dict:
         """Stop everything, finalise, export JSON + TXT, return JSON payload."""
+        log.info("Finishing meeting %s", self._meeting_id)
         self._audio.stop_all()
         remaining = self._engine.stop()
         for seg in remaining:
@@ -219,6 +237,7 @@ class MeetingController:
 
     def _on_transcription_segment(self, segment: TranscriptionSegment) -> None:
         """Called from the transcription worker thread."""
+        log.debug("Transcription segment: \"%s\" [%.1f-%.1f]", segment.text, segment.start, segment.end)
         # offset timestamps so they are relative to the original meeting start
         offset = self._elapsed_offset + (time.monotonic() - self._session_start)
         adjusted = TranscriptionSegment(
@@ -232,6 +251,8 @@ class MeetingController:
             for c in chunks:
                 c.meeting_id = self._meeting_id  # type: ignore[assignment]
             self._pending_chunks.extend(chunks)
+            if chunks:
+                log.info("Emitted %d chunk(s): %s", len(chunks), [c.text[:50] for c in chunks])
 
     # ------------------------------------------------------------------
     # periodic persistence
@@ -257,6 +278,7 @@ class MeetingController:
             self._pending_chunks = []
 
         await self._repo.insert_chunks(chunks)
+        log.info("Persisted %d chunk(s) to DB", len(chunks))
         if self.on_chunks_persisted:
             self.on_chunks_persisted(chunks)
 

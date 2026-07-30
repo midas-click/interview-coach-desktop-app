@@ -67,6 +67,9 @@ class Settings(BaseModel):
     @field_validator("whisper_model")
     @classmethod
     def _check_whisper_model(cls, v: str) -> str:
+        # Accept HuggingFace model names OR local paths (e.g. ./models/whisper-base)
+        if Path(v).exists():
+            return str(Path(v).resolve())
         if v not in VALID_WHISPER_MODELS:
             raise ValueError(
                 f"Unknown whisper model '{v}'. "

@@ -2,6 +2,7 @@
 # Copy to config.yaml and customise
 
 # Whisper model: tiny, base, small, medium, large-v3
+# Or a local path like ./models/whisper-base
 whisper_model: base
 
 # Audio devices (leave empty for system default)

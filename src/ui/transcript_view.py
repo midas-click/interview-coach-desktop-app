@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QFrame, QTextEdit, QVBoxLayout, QWidget
 from src.storage.models import TranscriptChunk
 
 
-class TranscriptView(QWidget):
+class TranscriptView(QFrame):
     """Read-only text area that appends transcript chunks as they arrive."""
 
     def __init__(self, parent: QWidget | None = None) -> None:

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import queue
 import threading
-import time
 from collections import deque
 from dataclasses import dataclass
 
@@ -16,6 +15,9 @@ import numpy as np
 from faster_whisper import WhisperModel
 
 from src.audio.capture import AudioChunk
+from src.logger.logger import get_logger
+
+log = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # output type
@@ -54,11 +56,10 @@ class TranscriptionEngine:
         overlap_duration: float = 0.5,
     ) -> None:
         self._model = WhisperModel(model_name, device=device, compute_type=compute_type)
-        self._sample_rate = 16000
+        self._sample_rate: int | None = None  # detected from first chunk
 
         self._buffer_duration = buffer_duration
-        self._min_samples = int(self._sample_rate * buffer_duration)
-        self._overlap_samples = int(self._sample_rate * overlap_duration)
+        self._overlap_duration = overlap_duration
 
         # mutable state (guarded by _lock or only accessed in worker thread)
         self._audio_buffer: deque[tuple[np.ndarray, float]] = deque()
@@ -66,10 +67,10 @@ class TranscriptionEngine:
         self._running = False
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        self._processed_offset = 0.0  # cumulative seconds transcribed
 
-        # set by start()
+        # set by start() / stop()
         self._on_segment: SegmentCallback | None = None
+        self._final_segments: list[TranscriptionSegment] = []
 
     # ----------------------------------------------------------------
     # public API
@@ -90,7 +91,6 @@ class TranscriptionEngine:
             return
 
         self._running = True
-        self._processed_offset = 0.0
         self._on_segment = on_segment
         self._thread = threading.Thread(
             target=self._worker,
@@ -101,32 +101,46 @@ class TranscriptionEngine:
         self._thread.start()
 
     def stop(self) -> list[TranscriptionSegment]:
-        """Signal the worker to stop and return any remaining segments."""
+        """Signal the worker to stop and return any remaining segments.
+
+        The worker thread transcribes remaining audio before exiting.
+        This method blocks until the worker finishes (or timeout).
+        """
         self._running = False
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=10.0)
-        return self._flush()
+            self._thread.join(timeout=30.0)
+        return self._final_segments
 
     # ----------------------------------------------------------------
     # worker loop
     # ----------------------------------------------------------------
 
     def _worker(self, audio_queue: queue.Queue[AudioChunk]) -> None:
+        log.info("Transcription worker started")
         while self._running:
             try:
                 chunk = audio_queue.get(timeout=0.5)
             except queue.Empty:
                 # no new audio — transcribe whatever is buffered
-                if self._buffer_len >= self._sample_rate * 1.0:
+                if self._buffer_len >= (self._sample_rate or 16000) * 1.0:
                     self._transcribe_buffer()
                 continue
 
             with self._lock:
                 self._audio_buffer.append((chunk.data, chunk.timestamp))
                 self._buffer_len += len(chunk.data)
+                # Detect sample rate from first chunk
+                if self._sample_rate is None and chunk.sample_rate > 0:
+                    self._sample_rate = chunk.sample_rate
 
-            if self._buffer_len >= self._min_samples:
+            min_samples = int((self._sample_rate or 16000) * self._buffer_duration)
+            if self._buffer_len >= min_samples:
                 self._transcribe_buffer()
+
+        # Flush remaining audio before thread exits — avoids calling
+        # model.transcribe() from two threads simultaneously.
+        self._final_segments = self._flush()
+        log.info("Transcription worker stopped")
 
     # ----------------------------------------------------------------
     # transcription
@@ -138,9 +152,12 @@ class TranscriptionEngine:
             if self._buffer_len == 0:
                 return
             audio, base_timestamp = self._assemble_buffer()
-            keep = min(self._overlap_samples, self._buffer_len)
+            sr = self._sample_rate or 16000
+            duration = len(audio) / sr
+            keep = min(int(sr * self._overlap_duration), self._buffer_len)
             self._trim_buffer(keep)
 
+        log.debug("Transcribing %.1fs of audio", duration)
         segments, _info = self._model.transcribe(
             audio,
             vad_filter=True,
@@ -150,18 +167,12 @@ class TranscriptionEngine:
             best_of=5,
         )
 
+        seg_count = 0
         for seg in segments:
-            start = base_timestamp + seg.start
-            end = base_timestamp + seg.end
-            self._processed_offset = max(self._processed_offset, end)
-            self._emit(
-                TranscriptionSegment(
-                    text=seg.text.strip(),
-                    start=round(start, 2),
-                    end=round(end, 2),
-                    confidence=round(seg.avg_log_prob, 3),
-                )
-            )
+            seg_count += 1
+            self._emit(self._make_segment(seg, base_timestamp))
+        if seg_count:
+            log.info("Transcribed %d segment(s)", seg_count)
 
     def _flush(self) -> list[TranscriptionSegment]:
         """Transcribe everything remaining in the buffer (called on stop)."""
@@ -184,15 +195,17 @@ class TranscriptionEngine:
         )
 
         for seg in raw_segments:
-            segments.append(
-                TranscriptionSegment(
-                    text=seg.text.strip(),
-                    start=round(base_timestamp + seg.start, 2),
-                    end=round(base_timestamp + seg.end, 2),
-                    confidence=round(seg.avg_log_prob, 3),
-                )
-            )
+            segments.append(self._make_segment(seg, base_timestamp))
         return segments
+
+    @staticmethod
+    def _make_segment(whisper_seg, base_timestamp: float) -> TranscriptionSegment:
+        return TranscriptionSegment(
+            text=whisper_seg.text.strip(),
+            start=round(base_timestamp + whisper_seg.start, 2),
+            end=round(base_timestamp + whisper_seg.end, 2),
+            confidence=round(whisper_seg.avg_logprob, 3),
+        )
 
     # ----------------------------------------------------------------
     # buffer helpers
@@ -213,15 +226,15 @@ class TranscriptionEngine:
             self._buffer_len = 0
             return
 
-        remaining = keep_samples
-        while self._audio_buffer and remaining > 0:
+        to_remove = self._buffer_len - keep_samples
+        while self._audio_buffer and to_remove > 0:
             data, ts = self._audio_buffer.popleft()
-            if len(data) <= remaining:
-                remaining -= len(data)
+            if len(data) <= to_remove:
+                to_remove -= len(data)
             else:
-                # partial keep
-                self._audio_buffer.appendleft((data[-remaining:], ts))
-                remaining = 0
+                # keep the right-hand tail of this chunk
+                self._audio_buffer.appendleft((data[to_remove:], ts))
+                to_remove = 0
 
         self._buffer_len = sum(len(d) for d, _ in self._audio_buffer)
 
