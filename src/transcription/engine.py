@@ -161,10 +161,12 @@ class TranscriptionEngine:
         segments, _info = self._model.transcribe(
             audio,
             vad_filter=True,
+            vad_parameters={"threshold": 0.35},
             word_timestamps=True,
             language="en",
             beam_size=5,
-            best_of=5,
+            best_of=1,
+            initial_prompt="Interview conversation about technology, software engineering, and professional experience.",
         )
 
         seg_count = 0
@@ -188,10 +190,12 @@ class TranscriptionEngine:
         raw_segments, _info = self._model.transcribe(
             audio,
             vad_filter=True,
+            vad_parameters={"threshold": 0.35},
             word_timestamps=True,
             language="en",
             beam_size=5,
-            best_of=5,
+            best_of=1,
+            initial_prompt="Interview conversation about technology, software engineering, and professional experience.",
         )
 
         for seg in raw_segments:
