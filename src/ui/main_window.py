@@ -80,7 +80,6 @@ class MainWindow(QMainWindow):
         self._controls.finish_requested.connect(
             lambda: asyncio.ensure_future(self._on_finish())
         )
-        self._controls.settings_requested.connect(self._on_settings)
 
         # controller callbacks → UI
         self._controller.on_status_change = self._dashboard.set_status
@@ -124,8 +123,8 @@ class MainWindow(QMainWindow):
             company = self._dashboard.company_name.text().strip() or None
             stage = self._dashboard.interview_stage.text().strip() or None
 
-            mic_dev = self._settings.microphone_device
-            sys_dev = self._settings.system_audio_device
+            mic_dev = self._dashboard.selected_mic_device
+            sys_dev = self._dashboard.selected_sys_device
 
             await self._controller.create_meeting(company, stage)
             log.info("Meeting created: %s", self._controller.meeting_id)
@@ -146,8 +145,8 @@ class MainWindow(QMainWindow):
 
     async def _on_resume(self) -> None:
         log.info("Resume button clicked")
-        mic_dev = self._settings.microphone_device
-        sys_dev = self._settings.system_audio_device
+        mic_dev = self._dashboard.selected_mic_device
+        sys_dev = self._dashboard.selected_sys_device
         await self._controller.resume(mic_device=mic_dev, sys_device=sys_dev)
         self._start_elapsed()
         self._controls.set_state(ControlBar.State.ACTIVE)
@@ -173,21 +172,14 @@ class MainWindow(QMainWindow):
             self._dashboard.set_upload_status(f"Failed: {exc}")
 
         self._dashboard.set_status("Idle")
+        self._dashboard.reset_inputs()
         self._controls.set_state(ControlBar.State.IDLE)
-
-    def _on_settings(self) -> None:
-        from src.ui.settings_dialog import SettingsDialog
-
-        dialog = SettingsDialog(self._settings, self)
-        if dialog.exec():
-            from src.config.settings import save_settings
-            save_settings(self._settings, dialog.config_path)
 
     def _start_elapsed(self) -> None:
         self._elapsed_seconds = 0
-        self._dashboard.set_elapsed(0)
+        self._controls.set_elapsed(0)
         self._elapsed_timer.start()
 
     def _tick_elapsed(self) -> None:
         self._elapsed_seconds += 1
-        self._dashboard.set_elapsed(self._elapsed_seconds)
+        self._controls.set_elapsed(self._elapsed_seconds)

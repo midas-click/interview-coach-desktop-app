@@ -1,15 +1,18 @@
-"""Status dashboard showing meeting info, elapsed time, and indicators."""
+"""Status dashboard showing meeting info, device selection, and status."""
 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QGridLayout,
     QLabel,
     QLineEdit,
     QWidget,
 )
+
+from src.audio.capture import list_microphones, list_loopback_devices
 
 
 def _label(text: str) -> QLabel:
@@ -55,10 +58,20 @@ class Dashboard(QFrame):
         self.interview_stage.setMaximumWidth(200)
         grid.addWidget(self.interview_stage, 1, 3)
 
-        # row 2 — elapsed
-        grid.addWidget(_label("Elapsed:"), 2, 0)
-        self.elapsed_lbl = _value_label()
-        grid.addWidget(self.elapsed_lbl, 2, 1)
+        # row 2 — mic / sys device selection
+        grid.addWidget(_label("Microphone:"), 2, 0)
+        self.mic_combo = QComboBox()
+        self.mic_combo.addItem("(system default)", None)
+        self._populate_mic_devices()
+        self.mic_combo.setMaximumWidth(300)
+        grid.addWidget(self.mic_combo, 2, 1)
+
+        grid.addWidget(_label("System audio:"), 2, 2)
+        self.sys_combo = QComboBox()
+        self.sys_combo.addItem("(none — mic only)", None)
+        self._populate_sys_devices()
+        self.sys_combo.setMaximumWidth(300)
+        grid.addWidget(self.sys_combo, 2, 3)
 
         # row 3 — status + upload
         grid.addWidget(_label("Status:"), 3, 0)
@@ -69,16 +82,15 @@ class Dashboard(QFrame):
         self.upload_lbl = QLabel("—")
         grid.addWidget(self.upload_lbl, 3, 3)
 
-        # row 4 — mic / sys indicators
-        grid.addWidget(_label("Mic:"), 4, 0)
-        self.mic_lbl = QLabel("○")
-        grid.addWidget(self.mic_lbl, 4, 1)
-
-        grid.addWidget(_label("System audio:"), 4, 2)
-        self.sys_lbl = QLabel("○")
-        grid.addWidget(self.sys_lbl, 4, 3)
-
     # -- public ----------------------------------------------------------
+
+    @property
+    def selected_mic_device(self) -> int | None:
+        return self.mic_combo.currentData()
+
+    @property
+    def selected_sys_device(self) -> int | None:
+        return self.sys_combo.currentData()
 
     def set_meeting_id(self, mid: str) -> None:
         self.meeting_id_lbl.setText(mid)
@@ -86,17 +98,32 @@ class Dashboard(QFrame):
     def set_company_info(self, company: str | None, stage: str | None) -> None:
         self.company_name.setReadOnly(True)
         self.interview_stage.setReadOnly(True)
+        self.mic_combo.setEnabled(False)
+        self.sys_combo.setEnabled(False)
 
-    def set_elapsed(self, seconds: int) -> None:
-        m, s = divmod(seconds, 60)
-        h, m = divmod(m, 60)
-        if h:
-            self.elapsed_lbl.setText(f"{h}:{m:02d}:{s:02d}")
-        else:
-            self.elapsed_lbl.setText(f"{m:02d}:{s:02d}")
+    def reset_inputs(self) -> None:
+        """Re-enable inputs for a new meeting."""
+        self.company_name.setReadOnly(False)
+        self.interview_stage.setReadOnly(False)
+        self.company_name.clear()
+        self.interview_stage.clear()
+        self.mic_combo.setEnabled(True)
+        self.sys_combo.setEnabled(True)
+        self.meeting_id_lbl.setText("—")
+        self.upload_lbl.setText("—")
 
     def set_status(self, status: str) -> None:
         self.status_lbl.setText(status)
 
     def set_upload_status(self, text: str) -> None:
         self.upload_lbl.setText(text)
+
+    # -- device population ----------------------------------------------
+
+    def _populate_mic_devices(self) -> None:
+        for d in list_microphones():
+            self.mic_combo.addItem(f"{d['name']}  [{d['host_api']}]", d["index"])
+
+    def _populate_sys_devices(self) -> None:
+        for d in list_loopback_devices():
+            self.sys_combo.addItem(f"{d['name']}  [{d['host_api']}]", d["index"])

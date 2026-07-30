@@ -1,12 +1,11 @@
-"""Application settings: typed model + YAML persistence."""
+"""Application settings loaded from environment / .env file."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 VALID_WHISPER_MODELS = frozenset({
     "tiny", "tiny.en",
@@ -21,26 +20,13 @@ VALID_WHISPER_MODELS = frozenset({
 VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 
 
-class Settings(BaseModel):
-    """User-configurable application settings.
+class Settings(BaseSettings):
+    """Application settings loaded from .env / environment variables."""
 
-    AWS secrets are stored in this model for persistence across sessions,
-    but environment variables (AWS_ACCESS_KEY_ID, etc.) take precedence
-    at load time.
-    """
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # ---------- transcription ----------
     whisper_model: str = "base"
-
-    # ---------- audio ----------
-    microphone_device: int | None = Field(
-        default=None,
-        description="PyAudio device index for microphone input",
-    )
-    system_audio_device: int | None = Field(
-        default=None,
-        description="PyAudio device index for system audio (loopback)",
-    )
 
     # ---------- output ----------
     output_dir: Path = Field(
@@ -67,7 +53,6 @@ class Settings(BaseModel):
     @field_validator("whisper_model")
     @classmethod
     def _check_whisper_model(cls, v: str) -> str:
-        # Accept HuggingFace model names OR local paths (e.g. ./models/whisper-base)
         if Path(v).exists():
             return str(Path(v).resolve())
         if v not in VALID_WHISPER_MODELS:
@@ -87,36 +72,3 @@ class Settings(BaseModel):
                 f"Valid levels: {', '.join(sorted(VALID_LOG_LEVELS))}"
             )
         return upper
-
-
-# ---------------------------------------------------------------------------
-# persistence helpers
-# ---------------------------------------------------------------------------
-
-def load_settings(path: Path) -> Settings:
-    """Load settings from a YAML file.
-
-    Falls back to defaults if the file is missing.
-    """
-    if not path.exists():
-        return Settings()
-
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    settings = Settings(**raw)
-    _apply_env_overrides(settings)
-    return settings
-
-
-def save_settings(settings: Settings, path: Path) -> None:
-    """Persist settings to a YAML file, creating parent directories as needed."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = settings.model_dump(mode="json")
-    path.write_text(yaml.safe_dump(data, default_flow_style=False), encoding="utf-8")
-
-
-def _apply_env_overrides(settings: Settings) -> None:
-    """Override AWS fields from environment variables when set."""
-    for key in ("aws_access_key_id", "aws_secret_access_key", "aws_region", "aws_bucket"):
-        env_key = key.upper()
-        if env_key in os.environ:
-            setattr(settings, key, os.environ[env_key])

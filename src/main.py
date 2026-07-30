@@ -13,14 +13,13 @@ from pathlib import Path
 import qasync
 from PySide6.QtWidgets import QApplication
 
-from src.config.settings import load_settings
+from src.config.settings import Settings
 from src.logger.logger import get_logger, setup_logging
 from src.meeting.controller import MeetingController
 from src.storage.repository import Repository
 from src.upload.s3_uploader import S3Uploader
 from src.ui.main_window import MainWindow
 
-CONFIG_PATH = Path("config.yaml")
 DB_PATH = Path("data/transcriber.db")
 
 
@@ -31,7 +30,7 @@ def main() -> None:
     app.setApplicationVersion("0.1.0")
 
     # --- config & logging ------------------------------------------------
-    settings = load_settings(CONFIG_PATH)
+    settings = Settings()
     setup_logging(settings)
     log = get_logger(__name__)
     log.info("Application starting")
