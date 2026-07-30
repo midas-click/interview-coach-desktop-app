@@ -168,7 +168,7 @@ class MeetingController:
         self._notify_status("active")
 
     async def finish(self) -> dict:
-        """Stop everything, finalise, export, and return the transcript payload."""
+        """Stop everything, finalise, export JSON + TXT, return JSON payload."""
         self._audio.stop_all()
         remaining = self._engine.stop()
         for seg in remaining:
@@ -185,7 +185,17 @@ class MeetingController:
         await self._repo.finish_meeting(self._meeting_id)  # type: ignore[arg-type]
         self._notify_status("finished")
 
-        return await self._repo.export_transcript(self._meeting_id)  # type: ignore[arg-type]
+        export = await self._repo.export_transcript(self._meeting_id)  # type: ignore[arg-type]
+        txt = await self._repo.export_txt(self._meeting_id)  # type: ignore[arg-type]
+        self._save_txt_local(txt)
+        return export
+
+    def _save_txt_local(self, text: str) -> None:
+        if not text.strip():
+            return
+        dir_path = self._settings.output_dir / (self._meeting_id or "unknown")
+        dir_path.mkdir(parents=True, exist_ok=True)
+        (dir_path / "transcript.txt").write_text(text, encoding="utf-8")
 
     # ------------------------------------------------------------------
     # crash recovery

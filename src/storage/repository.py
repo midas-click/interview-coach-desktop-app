@@ -191,6 +191,40 @@ class Repository:
             ],
         }
 
+    async def export_txt(self, meeting_id: str) -> str:
+        """Return the transcript as a plain-text document.
+
+        Format::
+
+            [00:00:01] Unknown: Tell me about yourself.
+            [00:00:05] Unknown: I have 10 years experience.
+        """
+        meeting = await self.get_meeting(meeting_id)
+        chunks = await self.get_chunks(meeting_id)
+
+        lines: list[str] = []
+        if meeting:
+            lines.append(f"Meeting: {meeting_id}")
+            if meeting.company_name:
+                lines.append(f"Company: {meeting.company_name}")
+            if meeting.interview_stage:
+                lines.append(f"Stage: {meeting.interview_stage}")
+            lines.append(f"Date: {meeting.created_at.strftime('%Y-%m-%d %H:%M UTC')}")
+            lines.append("")
+
+        for c in chunks:
+            ts = self._format_timestamp(c.start_time)
+            lines.append(f"[{ts}] {c.speaker}: {c.text}")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_timestamp(seconds: float) -> str:
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
