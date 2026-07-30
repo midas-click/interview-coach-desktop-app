@@ -236,14 +236,18 @@ class MeetingController:
     # ------------------------------------------------------------------
 
     def _on_transcription_segment(self, segment: TranscriptionSegment) -> None:
-        """Called from the transcription worker thread."""
+        """Called from the transcription worker thread.
+
+        The engine already emits segments with capture-relative timestamps
+        (AudioChunk.timestamp + whisper offset).  We only need to add the
+        accumulated pause time so timestamps stay meeting-relative across
+        pause/resume cycles.
+        """
         log.debug("Transcription segment: \"%s\" [%.1f-%.1f]", segment.text, segment.start, segment.end)
-        # offset timestamps so they are relative to the original meeting start
-        offset = self._elapsed_offset + (time.monotonic() - self._session_start)
         adjusted = TranscriptionSegment(
             text=segment.text,
-            start=segment.start + offset,
-            end=segment.end + offset,
+            start=segment.start + self._elapsed_offset,
+            end=segment.end + self._elapsed_offset,
             confidence=segment.confidence,
         )
         with self._lock:

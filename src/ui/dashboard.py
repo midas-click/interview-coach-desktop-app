@@ -63,14 +63,14 @@ class Dashboard(QFrame):
         self.mic_combo = QComboBox()
         self.mic_combo.addItem("(system default)", None)
         self._populate_mic_devices()
-        self.mic_combo.setMaximumWidth(300)
+        self.mic_combo.setMaximumWidth(200)
         grid.addWidget(self.mic_combo, 2, 1)
 
         grid.addWidget(_label("System audio:"), 2, 2)
         self.sys_combo = QComboBox()
         self.sys_combo.addItem("(none — mic only)", None)
         self._populate_sys_devices()
-        self.sys_combo.setMaximumWidth(300)
+        self.sys_combo.setMaximumWidth(200)
         grid.addWidget(self.sys_combo, 2, 3)
 
         # row 3 — status + upload
@@ -122,8 +122,8 @@ class Dashboard(QFrame):
 
     def _populate_mic_devices(self) -> None:
         for d in list_microphones():
-            self.mic_combo.addItem(f"{d['name']}  [{d['host_api']}]", d["index"])
+            self.mic_combo.addItem(d["name"], d["index"])
 
     def _populate_sys_devices(self) -> None:
         for d in list_loopback_devices():
-            self.sys_combo.addItem(f"{d['name']}  [{d['host_api']}]", d["index"])
+            self.sys_combo.addItem(d["name"], d["index"])

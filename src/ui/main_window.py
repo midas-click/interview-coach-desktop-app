@@ -45,7 +45,7 @@ class MainWindow(QMainWindow):
         self._uploader = uploader
 
         self.setWindowTitle("Interview Transcriber")
-        self.setMinimumSize(900, 600)
+        self.setMinimumSize(600, 420)
 
         # -- central widget -------------------------------------------------
         central = QWidget()

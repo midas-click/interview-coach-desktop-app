@@ -226,14 +226,15 @@ class TranscriptionEngine:
             self._buffer_len = 0
             return
 
+        sr = self._sample_rate or 16000
         to_remove = self._buffer_len - keep_samples
         while self._audio_buffer and to_remove > 0:
             data, ts = self._audio_buffer.popleft()
             if len(data) <= to_remove:
                 to_remove -= len(data)
             else:
-                # keep the right-hand tail of this chunk
-                self._audio_buffer.appendleft((data[to_remove:], ts))
+                # keep the tail — adjust ts to match the new start
+                self._audio_buffer.appendleft((data[to_remove:], ts + to_remove / sr))
                 to_remove = 0
 
         self._buffer_len = sum(len(d) for d, _ in self._audio_buffer)
