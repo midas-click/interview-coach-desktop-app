@@ -1,0 +1,19 @@
+# Interview Transcriber Configuration
+# Copy to config.yaml and customise
+
+# Whisper model: tiny, base, small, medium, large-v3
+whisper_model: base
+
+# Audio devices (leave empty for system default)
+microphone_device: null
+system_audio_device: null
+
+# Output directory for local exports
+output_dir: ./output
+
+# Auto-upload to S3 when interview finishes
+auto_upload: true
+
+# Logging
+log_level: INFO
+log_file: ./logs/transcriber.log
