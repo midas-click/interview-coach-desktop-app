@@ -249,6 +249,7 @@ class MeetingController:
             start=segment.start + self._elapsed_offset,
             end=segment.end + self._elapsed_offset,
             confidence=segment.confidence,
+            speaker=segment.speaker,
         )
         with self._lock:
             chunks = self._segment_builder.feed(adjusted)

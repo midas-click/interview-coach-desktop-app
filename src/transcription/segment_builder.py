@@ -60,6 +60,7 @@ class _Pending:
     start: float
     end: float
     confidence: float
+    speaker: str = "Unknown"
 
 
 @dataclass
@@ -85,6 +86,7 @@ class SegmentBuilder:
                 start=segment.start,
                 end=segment.end,
                 confidence=segment.confidence,
+                speaker=segment.speaker,
             )
             return chunks
 
@@ -99,12 +101,13 @@ class SegmentBuilder:
                 start=merged.start,
                 end=merged.end,
                 confidence=merged.confidence,
+                speaker=merged.speaker,
             )
             return chunks
 
         # emit all but the last sentence (which may be partial)
         for sent in sentences[:-1]:
-            chunks.append(self._make_chunk(sent, merged.start, merged.end, merged.confidence))
+            chunks.append(self._make_chunk(sent, merged.start, merged.end, merged.confidence, merged.speaker))
 
         # keep the last partial sentence
         last = sentences[-1]
@@ -113,6 +116,7 @@ class SegmentBuilder:
             start=merged.start,
             end=merged.end,
             confidence=merged.confidence,
+            speaker=merged.speaker,
         )
         return chunks
 
@@ -126,6 +130,7 @@ class SegmentBuilder:
             self._pending.start,
             self._pending.end,
             self._pending.confidence,
+            self._pending.speaker,
         )
         self._pending = None
         return [chunk]
@@ -140,7 +145,7 @@ class SegmentBuilder:
 
     def _merge(self, seg: TranscriptionSegment) -> _Pending:
         if self._pending is None:
-            return _Pending(text=seg.text, start=seg.start, end=seg.end, confidence=seg.confidence)
+            return _Pending(text=seg.text, start=seg.start, end=seg.end, confidence=seg.confidence, speaker=seg.speaker)
 
         # if timestamps overlap, extend
         if seg.start <= self._pending.end + 0.3:
@@ -149,10 +154,11 @@ class SegmentBuilder:
                 start=self._pending.start,
                 end=seg.end,
                 confidence=(self._pending.confidence + seg.confidence) / 2,
+                speaker=self._pending.speaker,
             )
 
         # gap — treat as new sentence
-        return _Pending(text=seg.text, start=seg.start, end=seg.end, confidence=seg.confidence)
+        return _Pending(text=seg.text, start=seg.start, end=seg.end, confidence=seg.confidence, speaker=seg.speaker)
 
     @staticmethod
     def _overlap_ratio(new_text: str, old_text: str) -> float:
@@ -166,10 +172,10 @@ class SegmentBuilder:
         return len(words_new & words_old) / len(words_new)
 
     @staticmethod
-    def _make_chunk(text: str, start: float, end: float, confidence: float) -> TranscriptChunk:
+    def _make_chunk(text: str, start: float, end: float, confidence: float, speaker: str) -> TranscriptChunk:
         return TranscriptChunk(
             meeting_id="",  # filled by caller
-            speaker="Unknown",
+            speaker=speaker,
             start_time=round(start, 2),
             end_time=round(end, 2),
             confidence=round(confidence, 3),

@@ -118,6 +118,7 @@ class MainWindow(QMainWindow):
                 await self._controller.finish()
 
     async def _on_start(self) -> None:
+        self._transcript.clear()
         try:
             log.info("Start button clicked")
             company = self._dashboard.company_name.text().strip() or None
