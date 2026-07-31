@@ -17,6 +17,10 @@ from typing import Any
 import numpy as np
 import sounddevice as sd
 
+from src.logger.logger import get_logger
+
+_log = get_logger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # data
@@ -163,6 +167,14 @@ def _emit_chunk(
     elapsed = time.monotonic() - start_time
     audio_queue.put(AudioChunk(source=source, data=mono, sample_rate=sample_rate, timestamp=elapsed))
 
+    # Periodic log to confirm audio capture is alive
+    if int(elapsed) % 10 == 0 and int(elapsed) != getattr(_emit_chunk, "_last_log", -1):
+        _emit_chunk._last_log = int(elapsed)  # type: ignore[attr-defined]
+        try:
+            _log.debug("Audio chunk emitted: %s @ %.0fs (queue ~%d)", source, elapsed, audio_queue.qsize())
+        except Exception:
+            pass
+
 
 # ---------------------------------------------------------------------------
 # capture classes
@@ -237,9 +249,12 @@ class AudioCapture:
 
     def _on_audio(self, indata: np.ndarray, frames: int, _time: Any, status: int) -> None:
         del frames, status  # unused callback args
-        _emit_chunk(indata, self._sample_rate, self._chunk_duration,
-                    self._buffer, self._lock, self._queue,
-                    self._start_time, self._source)
+        try:
+            _emit_chunk(indata, self._sample_rate, self._chunk_duration,
+                        self._buffer, self._lock, self._queue,
+                        self._start_time, self._source)
+        except Exception:
+            _log.exception("AudioCapture callback crashed")
 
 
 class LoopbackCapture:
@@ -407,6 +422,9 @@ class LoopbackCapture:
 
     def _on_audio(self, indata: np.ndarray, frames: int, _time: Any, status: int) -> None:
         del frames, status
-        _emit_chunk(indata, self._sample_rate, self._chunk_duration,
-                    self._buffer, self._lock, self._queue,
-                    self._start_time, "system_audio")
+        try:
+            _emit_chunk(indata, self._sample_rate, self._chunk_duration,
+                        self._buffer, self._lock, self._queue,
+                        self._start_time, "system_audio")
+        except Exception:
+            _log.exception("LoopbackCapture callback crashed")

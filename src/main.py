@@ -20,7 +20,17 @@ from src.storage.repository import Repository
 from src.upload.s3_uploader import S3Uploader
 from src.ui.main_window import MainWindow
 
-DB_PATH = Path("data/transcriber.db")
+
+def _app_dir() -> Path:
+    """Directory containing the app bundle (or source tree in dev)."""
+    if getattr(sys, "frozen", False):
+        base = Path(sys.executable).parent
+        internal = base / "_internal"
+        return internal if internal.exists() else base
+    return Path(__file__).resolve().parent.parent
+
+
+DB_PATH = _app_dir() / "data" / "transcriber.db"
 
 
 def main() -> None:
@@ -31,6 +41,17 @@ def main() -> None:
 
     # --- config & logging ------------------------------------------------
     settings = Settings()
+
+    # When running as a frozen bundle, use paths relative to the app dir
+    # and auto-detect the bundled whisper model.
+    if getattr(sys, "frozen", False):
+        base = _app_dir()
+        settings.output_dir = base / "output"
+        settings.log_file = base / "logs" / "transcriber.log"
+        bundled_model = base / "models" / "whisper-base"
+        if bundled_model.exists():
+            settings.whisper_model = str(bundled_model)
+
     setup_logging(settings)
     log = get_logger(__name__)
     log.info("Application starting")

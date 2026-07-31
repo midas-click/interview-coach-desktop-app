@@ -77,7 +77,7 @@ class TranscriptionEngine:
         model_name: str = "base",
         device: str = "auto",
         compute_type: str = "int8",
-        buffer_duration: float = 3.0,
+        buffer_duration: float = 2.0,
         overlap_duration: float = 0.5,
     ) -> None:
         self._model = WhisperModel(model_name, device=device, compute_type=compute_type)
@@ -132,16 +132,21 @@ class TranscriptionEngine:
             try:
                 chunk = audio_queue.get(timeout=0.5)
             except queue.Empty:
-                self._drain_idle()
+                try:
+                    self._drain_idle()
+                except Exception:
+                    log.exception("drain_idle crashed")
                 continue
 
-            data = _resample(chunk.data, chunk.sample_rate)
-            key = _buffer_key(chunk.source)
-            with self._lock:
-                self._buffers[key].append((data, chunk.timestamp))
-                self._buffer_lens[key] += len(data)
-
-            self._drain_buffers()
+            try:
+                data = _resample(chunk.data, chunk.sample_rate)
+                key = _buffer_key(chunk.source)
+                with self._lock:
+                    self._buffers[key].append((data, chunk.timestamp))
+                    self._buffer_lens[key] += len(data)
+                self._drain_buffers()
+            except Exception:
+                log.exception("Worker failed processing audio chunk")
 
         self._final_segments = self._flush()
         log.info("Transcription worker stopped")
@@ -172,24 +177,29 @@ class TranscriptionEngine:
 
         duration = len(audio) / SAMPLE_RATE
         log.debug("Transcribing %.1fs of %s audio", duration, key)
-        segments, _info = self._model.transcribe(
-            audio,
-            vad_filter=True,
-            vad_parameters={"threshold": 0.5},
-            word_timestamps=True,
-            language="en",
-            beam_size=5,
-            best_of=1,
-            condition_on_previous_text=False,
-            compression_ratio_threshold=2.4,
-        )
+        try:
+            segments, _info = self._model.transcribe(
+                audio,
+                vad_filter=True,
+                vad_parameters={"threshold": 0.3},
+                word_timestamps=True,
+                language="en",
+                beam_size=5,
+                best_of=1,
+                condition_on_previous_text=False,
+                compression_ratio_threshold=2.4,
+            )
 
-        seg_count = 0
-        for seg in segments:
-            seg_count += 1
-            self._emit(self._make_segment(seg, base_timestamp, key))
-        if seg_count:
-            log.info("Transcribed %d segment(s) from %s", seg_count, key)
+            seg_count = 0
+            for seg in segments:
+                seg_count += 1
+                self._emit(self._make_segment(seg, base_timestamp, key))
+            if seg_count:
+                log.info("Transcribed %d segment(s) from %s", seg_count, key)
+            else:
+                log.debug("No speech detected in %.1fs of %s audio", duration, key)
+        except Exception:
+            log.exception("Transcription failed for %s audio", key)
 
     def _flush(self) -> list[TranscriptionSegment]:
         segments: list[TranscriptionSegment] = []
@@ -205,7 +215,7 @@ class TranscriptionEngine:
             raw_segments, _info = self._model.transcribe(
                 audio,
                 vad_filter=True,
-                vad_parameters={"threshold": 0.5},
+                vad_parameters={"threshold": 0.3},
                 word_timestamps=True,
                 language="en",
                 beam_size=5,

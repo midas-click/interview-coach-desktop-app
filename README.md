@@ -35,7 +35,7 @@ audio, transcribes with Whisper, persists to SQLite, and uploads to S3.
 |--------|------|---------------|
 | config | `src/config/settings.py` | Pydantic model, YAML load/save, env overrides |
 | logger | `src/logger/logger.py` | Structured logging (console + JSON file) |
-| audio | `src/audio/capture.py`, `manager.py` | PyAudio capture, float32 numpy output |
+| audio | `src/audio/capture.py`, `manager.py` | sounddevice capture (WASAPI native), float32 numpy output |
 | transcription | `src/transcription/engine.py`, `segment_builder.py` | faster-whisper in daemon thread, sentence merging |
 | storage | `src/storage/models.py`, `repository.py` | SQLite with WAL, async CRUD, JSON/TXT export |
 | meeting | `src/meeting/controller.py` | Lifecycle orchestrator, flush loop, crash recovery |
@@ -49,13 +49,13 @@ audio, transcribes with Whisper, persists to SQLite, and uploads to S3.
 ### Prerequisites
 
 - **Python 3.12+**
-- **FFmpeg** — used by faster-whisper internally for audio decoding.
-  - Download from [ffmpeg.org](https://ffmpeg.org/download.html)
-  - Add `ffmpeg.exe` to your `PATH` or place it in the project root.
-- **Working microphone** (optional USB/headset mic recommended).
-- **System audio loopback** — on Windows this requires a WASAPI loopback device.
-  Most audio interfaces expose one automatically. Check with the app's Settings
-  dialog after first launch.
+- **Working microphone** (USB/headset mic recommended).
+- **System audio loopback** — to capture speaker output alongside the mic,
+  Windows must expose a WASAPI loopback device for your output device.
+  Most audio interfaces expose one automatically. Check with the app's
+  device dropdown after first launch.
+
+  Audio capture uses `sounddevice` (WASAPI native) — no external codecs required.
 
 ### Install
 
@@ -195,7 +195,7 @@ Crash recovery: on startup, the app finds any meeting with `status = 'active' | 
 pytest tests/ -v
 ```
 
-34 tests across 4 modules (audio, transcription, meeting, upload).
+32 tests across 4 modules (audio, transcription, meeting, upload).
 
 ### Project Conventions
 
@@ -213,3 +213,15 @@ Architecture supports future extensions without major refactoring:
 - **Live translation** — add `translation/` module as a post-processing step
 - **AI coaching** — subscribe to `on_chunks_persisted` callback, add a coach module
 - **Streaming upload** — convert periodic flush loop to also upload chunks incrementally
+
+---
+
+## Standalone Build
+
+```powershell
+.\build.ps1
+```
+
+Outputs `dist/InterviewTranscriber/`. Copy that folder to any Windows 11
+machine and run `InterviewTranscriber.exe` — no Python or other dependencies
+needed. The bundled whisper model is auto-detected at startup.
