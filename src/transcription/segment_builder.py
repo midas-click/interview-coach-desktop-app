@@ -147,18 +147,46 @@ class SegmentBuilder:
         if self._pending is None:
             return _Pending(text=seg.text, start=seg.start, end=seg.end, confidence=seg.confidence, speaker=seg.speaker)
 
-        # if timestamps overlap, extend
+        # Timestamps overlap or are adjacent — simple concatenation.
         if seg.start <= self._pending.end + 0.3:
-            return _Pending(
-                text=f"{self._pending.text} {seg.text}".strip(),
-                start=self._pending.start,
-                end=seg.end,
-                confidence=(self._pending.confidence + seg.confidence) / 2,
-                speaker=self._pending.speaker,
+            return self._new_pending(
+                f"{self._pending.text} {seg.text}",
+                self._pending.start, seg.end,
+                (self._pending.confidence + seg.confidence) / 2,
+                self._pending.speaker,
             )
 
-        # gap — treat as new sentence
+        # Engine overlap may re-transcribe the same tail audio.
+        # If the new segment starts with words that match the end of
+        # pending, strip the duplicate prefix and merge.
+        if seg.start <= self._pending.end + 1.0:
+            deduped = self._dedup_boundary(self._pending.text, seg.text)
+            if deduped is not None:
+                return self._new_pending(
+                    deduped, self._pending.start, seg.end,
+                    (self._pending.confidence + seg.confidence) / 2,
+                    self._pending.speaker,
+                )
+
+        # True gap — unrelated sentence.
         return _Pending(text=seg.text, start=seg.start, end=seg.end, confidence=seg.confidence, speaker=seg.speaker)
+
+    @staticmethod
+    def _new_pending(text: str, start: float, end: float, confidence: float, speaker: str) -> _Pending:
+        return _Pending(text=text.strip(), start=start, end=end, confidence=confidence, speaker=speaker)
+
+    @staticmethod
+    def _dedup_boundary(old_text: str, new_text: str) -> str | None:
+        """If *new_text* starts with words from the end of *old_text*, return
+        a merged string with the duplicate prefix removed.  Returns None if
+        no overlap is found."""
+        old_words = old_text.split()
+        new_words = new_text.split()
+        for n in range(min(3, len(old_words), len(new_words)), 0, -1):
+            if [w.lower() for w in old_words[-n:]] == [w.lower() for w in new_words[:n]]:
+                tail = " ".join(new_words[n:])
+                return f"{old_text} {tail}".strip() if tail else old_text
+        return None
 
     @staticmethod
     def _overlap_ratio(new_text: str, old_text: str) -> float:
