@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -65,13 +64,6 @@ class S3Uploader:
             )
 
         return local_path
-
-    async def retry_upload(self, meeting_id: str) -> None:
-        """Re-upload a previously-saved local transcript."""
-        local_path = self._output_dir / meeting_id / "transcript.json"
-        if not local_path.exists():
-            raise FileNotFoundError(f"Local transcript not found: {local_path}")
-        await self._upload_with_retry(local_path, meeting_id)
 
     # ------------------------------------------------------------------
     # internals

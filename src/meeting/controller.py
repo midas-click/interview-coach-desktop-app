@@ -48,7 +48,11 @@ class MeetingController:
         self._repo = repository
 
         self._audio = AudioManager()
-        self._engine = TranscriptionEngine(model_name=settings.whisper_model)
+        self._engine = TranscriptionEngine(
+            model_name=settings.whisper_model,
+            device=settings.whisper_device,
+            compute_type=settings.whisper_compute_type,
+        )
         self._segment_builder = SegmentBuilder()
 
         # current meeting state

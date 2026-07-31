@@ -7,9 +7,7 @@ the installed sounddevice doesn't support the loopback parameter.
 
 from __future__ import annotations
 
-import contextlib
 import inspect
-import io
 import queue
 import threading
 import time
@@ -66,35 +64,6 @@ def list_loopback_devices() -> list[dict[str, Any]]:
         if d["hostapi"] == wasapi_idx and d["max_output_channels"] > 0:
             result.append(d)
     return result
-
-
-def test_device(device_index: int, as_loopback: bool = False, duration: float = 0.3) -> bool:
-    """Test whether a device can be opened.
-
-    When *as_loopback* is True, tries WASAPI loopback mode.
-    """
-    try:
-        info = sd.query_devices(device_index)
-        channels = max(info["max_input_channels"], 2) if not as_loopback else max(info["max_output_channels"], 2)
-        rate = int(info["default_samplerate"])
-        if rate <= 0:
-            rate = 44100
-
-        kwargs: dict = {
-            "device": device_index,
-            "channels": channels,
-            "samplerate": rate,
-            "dtype": "float32",
-        }
-        if as_loopback and _supports_wasapi_loopback():
-            kwargs["extra_settings"] = sd.WasapiSettings(loopback=True)
-
-        with contextlib.redirect_stderr(io.StringIO()):
-            with sd.InputStream(**kwargs):
-                sd.sleep(int(duration * 1000))
-        return True
-    except Exception:
-        return False
 
 
 # ---------------------------------------------------------------------------

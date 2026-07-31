@@ -81,6 +81,7 @@ class TranscriptionEngine:
         overlap_duration: float = 0.5,
     ) -> None:
         self._model = WhisperModel(model_name, device=device, compute_type=compute_type)
+        log.info("Whisper model loaded: %s on %s (%s)", model_name, device, compute_type)
 
         self._buffer_duration = buffer_duration
         self._overlap_duration = overlap_duration
@@ -174,12 +175,13 @@ class TranscriptionEngine:
         segments, _info = self._model.transcribe(
             audio,
             vad_filter=True,
-            vad_parameters={"threshold": 0.35},
+            vad_parameters={"threshold": 0.5},
             word_timestamps=True,
             language="en",
             beam_size=5,
             best_of=1,
-            initial_prompt="Interview conversation about technology, software engineering, and professional experience.",
+            condition_on_previous_text=False,
+            compression_ratio_threshold=2.4,
         )
 
         seg_count = 0
@@ -203,11 +205,13 @@ class TranscriptionEngine:
             raw_segments, _info = self._model.transcribe(
                 audio,
                 vad_filter=True,
-                vad_parameters={"threshold": 0.35},
+                vad_parameters={"threshold": 0.5},
                 word_timestamps=True,
                 language="en",
                 beam_size=5,
                 best_of=1,
+                condition_on_previous_text=False,
+                compression_ratio_threshold=2.4,
             )
             for seg in raw_segments:
                 segments.append(self._make_segment(seg, base_timestamp, key))

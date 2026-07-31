@@ -119,35 +119,3 @@ def test_local_file_kept_on_upload_failure(settings: Settings, mock_boto: MagicM
     asyncio.run(_test())
 
 
-# ---------------------------------------------------------------------------
-# retry_upload
-# ---------------------------------------------------------------------------
-
-def test_retry_upload_missing_file_raises(settings: Settings, mock_boto: MagicMock) -> None:
-    uploader = S3Uploader(settings)
-
-    import asyncio
-
-    async def _test():
-        with pytest.raises(FileNotFoundError):
-            await uploader.retry_upload("nonexistent")
-
-    asyncio.run(_test())
-
-
-def test_retry_upload_success(settings: Settings, mock_boto: MagicMock) -> None:
-    uploader = S3Uploader(settings)
-
-    # create local file first
-    local_dir = settings.output_dir / "retry-me"
-    local_dir.mkdir(parents=True)
-    (local_dir / "transcript.json").write_text('{"meetingId":"retry-me"}')
-
-    import asyncio
-
-    async def _test():
-        await uploader.retry_upload("retry-me")
-        mock_client = mock_boto.return_value.client.return_value
-        assert mock_client.upload_file.call_count == 1
-
-    asyncio.run(_test())

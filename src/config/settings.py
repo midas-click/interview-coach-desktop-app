@@ -27,6 +27,8 @@ class Settings(BaseSettings):
 
     # ---------- transcription ----------
     whisper_model: str = "base"
+    whisper_device: str = "auto"       # "auto" detects CUDA, "cpu" forces CPU
+    whisper_compute_type: str = "int8"  # "float16" on GPU, "int8" for CPU
 
     # ---------- output ----------
     output_dir: Path = Field(
