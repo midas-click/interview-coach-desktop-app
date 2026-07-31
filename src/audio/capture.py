@@ -252,15 +252,18 @@ class AudioCapture:
             self._buffer.clear()
 
     def _query_input_params(self) -> tuple[int, int]:
-        # Whisper expects 16 kHz — sounddevice resamples internally.
-        rate = 16000
         channels = 1
-        if self._device_index is not None:
-            try:
-                info = sd.query_devices(self._device_index)
+        rate = 44100
+        dev = self._device_index if self._device_index is not None else sd.default.device[0]
+        try:
+            if dev is not None and dev >= 0:
+                info = sd.query_devices(dev)
                 channels = max(info["max_input_channels"], 1)
-            except Exception:
-                pass
+                dr = int(info["default_samplerate"])
+                if dr > 0:
+                    rate = dr
+        except Exception:
+            pass
         return channels, rate
 
     def _on_audio(self, indata: np.ndarray, frames: int, _time: Any, status: int) -> None:
@@ -312,7 +315,7 @@ class LoopbackCapture:
     def _start_wasapi_loopback(self) -> None:
         device = self._resolve_loopback_device()
         channels = max(device.get("max_output_channels", 2), 2)
-        rate = 16000
+        rate = int(device.get("default_sample_rate", 0) or 44100)
         self._sample_rate = rate
 
         self._stream = sd.InputStream(
@@ -345,7 +348,7 @@ class LoopbackCapture:
                 f"No loopback microphone found for speaker '{speaker.name}'. "
                 f"Install a newer sounddevice for WASAPI loopback support."
             )
-        rate = 16000
+        rate = 44100
         self._sample_rate = rate
         # Create recorder on the main thread (COM must be initialised)
         self._soundcard_recorder = loopback.recorder(samplerate=rate).__enter__()

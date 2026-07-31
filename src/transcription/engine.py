@@ -3,6 +3,9 @@
 Pulls ``AudioChunk`` objects from a queue, routes them by source into
 separate buffers, transcribes each independently, and emits segments
 with the correct speaker label.
+
+Audio is expected at 16 kHz.  If a device doesn't support 16 kHz the
+capture layer falls back to its native rate, and we resample here.
 """
 
 from __future__ import annotations
@@ -19,6 +22,19 @@ from src.audio.capture import AudioChunk
 from src.logger.logger import get_logger
 
 log = get_logger(__name__)
+
+SAMPLE_RATE = 16000
+
+
+def _resample(audio: np.ndarray, src_rate: int) -> np.ndarray:
+    """Resample to 16 kHz when a device doesn't support it natively."""
+    if src_rate == SAMPLE_RATE:
+        return audio
+    new_len = int(len(audio) * SAMPLE_RATE / src_rate)
+    old_idx = np.arange(len(audio), dtype=np.float64)
+    new_idx = np.linspace(0, len(audio) - 1, new_len, dtype=np.float64)
+    return np.interp(new_idx, old_idx, audio).astype(np.float32)
+
 
 # ---------------------------------------------------------------------------
 # output type
@@ -44,10 +60,6 @@ def _buffer_key(source: str) -> str:
     return "mic" if source == "microphone" else "sys"
 
 
-def _speaker(source: str) -> str:
-    return "Me" if source == "microphone" else "Interviewer"
-
-
 # ---------------------------------------------------------------------------
 # engine
 # ---------------------------------------------------------------------------
@@ -69,12 +81,10 @@ class TranscriptionEngine:
         overlap_duration: float = 0.5,
     ) -> None:
         self._model = WhisperModel(model_name, device=device, compute_type=compute_type)
-        self._sample_rate: int | None = None
 
         self._buffer_duration = buffer_duration
         self._overlap_duration = overlap_duration
 
-        # per-source buffers: "mic" / "sys"
         self._buffers: dict[str, deque[tuple[np.ndarray, float]]] = {
             "mic": deque(), "sys": deque(),
         }
@@ -124,12 +134,11 @@ class TranscriptionEngine:
                 self._drain_idle()
                 continue
 
+            data = _resample(chunk.data, chunk.sample_rate)
             key = _buffer_key(chunk.source)
             with self._lock:
-                self._buffers[key].append((chunk.data, chunk.timestamp))
-                self._buffer_lens[key] += len(chunk.data)
-                if self._sample_rate is None and chunk.sample_rate > 0:
-                    self._sample_rate = chunk.sample_rate
+                self._buffers[key].append((data, chunk.timestamp))
+                self._buffer_lens[key] += len(data)
 
             self._drain_buffers()
 
@@ -137,15 +146,12 @@ class TranscriptionEngine:
         log.info("Transcription worker stopped")
 
     def _drain_idle(self) -> None:
-        """Transcribe partial buffers when no new audio arrives."""
-        sr = self._sample_rate or 16000
         for key in ("mic", "sys"):
-            if self._buffer_lens[key] >= sr * 1.0:
+            if self._buffer_lens[key] >= SAMPLE_RATE * 1.0:
                 self._transcribe_buffer(key)
 
     def _drain_buffers(self) -> None:
-        sr = self._sample_rate or 16000
-        min_samples = int(sr * self._buffer_duration)
+        min_samples = int(SAMPLE_RATE * self._buffer_duration)
         for key in ("mic", "sys"):
             if self._buffer_lens[key] >= min_samples:
                 self._transcribe_buffer(key)
@@ -160,11 +166,10 @@ class TranscriptionEngine:
             if buf_len == 0:
                 return
             audio, base_timestamp = self._assemble_buffer(key)
-            sr = self._sample_rate or 16000
-            keep = min(int(sr * self._overlap_duration), buf_len)
+            keep = min(int(SAMPLE_RATE * self._overlap_duration), buf_len)
             self._trim_buffer(key, keep)
 
-        duration = len(audio) / sr
+        duration = len(audio) / SAMPLE_RATE
         log.debug("Transcribing %.1fs of %s audio", duration, key)
         segments, _info = self._model.transcribe(
             audio,
@@ -203,7 +208,6 @@ class TranscriptionEngine:
                 language="en",
                 beam_size=5,
                 best_of=1,
-                initial_prompt="Interview conversation about technology, software engineering, and professional experience.",
             )
             for seg in raw_segments:
                 segments.append(self._make_segment(seg, base_timestamp, key))
@@ -238,7 +242,6 @@ class TranscriptionEngine:
             self._buffer_lens[key] = 0
             return
 
-        sr = self._sample_rate or 16000
         current_len = self._buffer_lens[key]
         to_remove = current_len - keep_samples
         while buf and to_remove > 0:
@@ -246,7 +249,7 @@ class TranscriptionEngine:
             if len(data) <= to_remove:
                 to_remove -= len(data)
             else:
-                buf.appendleft((data[to_remove:], ts + to_remove / sr))
+                buf.appendleft((data[to_remove:], ts + to_remove / SAMPLE_RATE))
                 to_remove = 0
 
         self._buffer_lens[key] = sum(len(d) for d, _ in buf)
