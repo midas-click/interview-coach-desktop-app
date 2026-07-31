@@ -33,10 +33,6 @@ class Settings(BaseSettings):
         default=Path("./output"),
         description="Directory for local transcript exports",
     )
-    auto_upload: bool = Field(
-        default=True,
-        description="Upload to S3 automatically when interview finishes",
-    )
 
     # ---------- aws ----------
     aws_region: str = "us-east-1"

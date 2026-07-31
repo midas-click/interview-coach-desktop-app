@@ -208,6 +208,14 @@ class MeetingController:
         self._save_txt_local(txt)
         return export
 
+    async def export_current(self) -> dict:
+        """Re-export the current meeting's transcript (for manual upload)."""
+        if self._meeting_id is None:
+            raise RuntimeError("No meeting to export")
+        export = await self._repo.export_transcript(self._meeting_id)
+        self._save_txt_local(await self._repo.export_txt(self._meeting_id))
+        return export
+
     def _save_txt_local(self, text: str) -> None:
         if not text.strip():
             return
