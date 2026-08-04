@@ -11,9 +11,7 @@ from pydantic import BaseModel, Field
 class MeetingStatus(str, Enum):
     PENDING = "pending"
     ACTIVE = "active"
-    PAUSED = "paused"
     FINISHED = "finished"
-    FAILED = "failed"
 
 
 class Meeting(BaseModel):

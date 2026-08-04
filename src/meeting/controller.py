@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
 import uuid
 from typing import TYPE_CHECKING
 
@@ -57,8 +56,6 @@ class MeetingController:
 
         # current meeting state
         self._meeting_id: str | None = None
-        self._session_start: float = 0.0       # monotonic time when capture (re-)started
-        self._elapsed_offset: float = 0.0       # accumulated seconds before current session
 
         # pending chunks waiting for periodic DB flush
         self._lock = threading.Lock()
@@ -104,8 +101,6 @@ class MeetingController:
         if self._meeting_id is None:
             raise RuntimeError("No meeting created — call create_meeting() first")
 
-        # Always start microphone unless explicitly asked not to.
-        # Passing a device index of None uses the system default.
         self._audio.start_microphone(mic_device)
         if sys_device is not None:
             try:
@@ -119,61 +114,12 @@ class MeetingController:
             "off" if sys_device is None else f"device {sys_device}",
         )
 
-        self._elapsed_offset = 0.0
-        self._session_start = time.monotonic()
         self._engine.start(self._audio.audio_queue, self._on_transcription_segment)
 
         self._flush_stop = asyncio.Event()
         self._flush_task = asyncio.create_task(self._flush_loop())
 
         await self._repo.start_meeting(self._meeting_id)
-        self._notify_status("active")
-
-    async def pause(self) -> None:
-        """Pause capture and transcription, persist everything."""
-        log.info("Pausing meeting %s", self._meeting_id)
-        self._audio.stop_all()
-        remaining = self._engine.stop()
-        for seg in remaining:
-            self._on_transcription_segment(seg)
-
-        # finalise segment builder
-        with self._lock:
-            chunks = self._segment_builder.flush()
-            for c in chunks:
-                c.meeting_id = self._meeting_id  # type: ignore[assignment]
-            self._pending_chunks.extend(chunks)
-
-        await self._persist_pending()
-        self._stop_flush_loop()
-        await self._repo.pause_meeting(self._meeting_id)  # type: ignore[arg-type]
-        self._notify_status("paused")
-        log.info("Meeting %s paused — %d chunks persisted", self._meeting_id, len(chunks))
-
-    async def resume(
-        self,
-        mic_device: int | None = None,
-        sys_device: int | None = None,
-    ) -> None:
-        """Resume after a pause, accumulating elapsed time offset."""
-        log.info("Resuming meeting %s", self._meeting_id)
-        self._elapsed_offset += time.monotonic() - self._session_start
-
-        if mic_device is not None:
-            self._audio.start_microphone(mic_device)
-        if sys_device is not None:
-            try:
-                self._audio.start_system_audio(sys_device)
-            except Exception as exc:
-                log.warning("System audio device %d failed: %s", sys_device, exc)
-
-        self._session_start = time.monotonic()
-        self._engine.start(self._audio.audio_queue, self._on_transcription_segment)
-
-        self._flush_stop = asyncio.Event()
-        self._flush_task = asyncio.create_task(self._flush_loop())
-
-        await self._repo.resume_meeting(self._meeting_id)  # type: ignore[arg-type]
         self._notify_status("active")
 
     async def finish(self) -> dict:
@@ -223,7 +169,6 @@ class MeetingController:
         """Check for an unfinished meeting from a previous run.
 
         Returns the meeting ID if found, otherwise ``None``.
-        The caller should decide whether to resume or finalise it.
         """
         meeting = await self._repo.get_active_meeting()
         if meeting is None:
@@ -236,23 +181,14 @@ class MeetingController:
     # ------------------------------------------------------------------
 
     def _on_transcription_segment(self, segment: TranscriptionSegment) -> None:
-        """Called from the transcription worker thread.
+        """Called from the transcription executor thread.
 
-        The engine already emits segments with capture-relative timestamps
-        (AudioChunk.timestamp + whisper offset).  We only need to add the
-        accumulated pause time so timestamps stay meeting-relative across
-        pause/resume cycles.
+        Timestamps are sample-count-based within one engine session,
+        so they're naturally meeting-relative with no offset needed.
         """
         log.debug("Transcription segment: \"%s\" [%.1f-%.1f]", segment.text, segment.start, segment.end)
-        adjusted = TranscriptionSegment(
-            text=segment.text,
-            start=segment.start + self._elapsed_offset,
-            end=segment.end + self._elapsed_offset,
-            confidence=segment.confidence,
-            speaker=segment.speaker,
-        )
         with self._lock:
-            chunks = self._segment_builder.feed(adjusted)
+            chunks = self._segment_builder.feed(segment)
             for c in chunks:
                 c.meeting_id = self._meeting_id  # type: ignore[assignment]
             self._pending_chunks.extend(chunks)

@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS meetings (
     started_at      TEXT,
     ended_at        TEXT,
     status          TEXT NOT NULL DEFAULT 'pending'
-                    CHECK (status IN ('pending','active','paused','finished','failed'))
+                    CHECK (status IN ('pending','active','finished'))
 );
 
 CREATE TABLE IF NOT EXISTS transcript_chunks (
@@ -107,12 +107,6 @@ class Repository:
     async def start_meeting(self, meeting_id: str) -> None:
         await self._update_status(meeting_id, MeetingStatus.ACTIVE)
 
-    async def pause_meeting(self, meeting_id: str) -> None:
-        await self._update_status(meeting_id, MeetingStatus.PAUSED)
-
-    async def resume_meeting(self, meeting_id: str) -> None:
-        await self._update_status(meeting_id, MeetingStatus.ACTIVE)
-
     async def finish_meeting(self, meeting_id: str) -> None:
         await self._update_status(meeting_id, MeetingStatus.FINISHED)
 
@@ -133,7 +127,7 @@ class Repository:
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT * FROM meetings WHERE status IN ('active', 'paused') "
+                "SELECT * FROM meetings WHERE status = 'active' "
                 "ORDER BY created_at DESC LIMIT 1"
             )
             row = await cursor.fetchone()

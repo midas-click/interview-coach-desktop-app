@@ -95,22 +95,6 @@ def test_full_lifecycle(tmp_path: Path) -> None:
 
         # simulate transcription segments
         ctrl._on_transcription_segment(_segment("Tell me about yourself.", 1.0, 3.0))
-
-        # pause
-        await ctrl.pause()
-        meeting = await repo.get_meeting(mid)
-        assert meeting is not None and meeting.status == MeetingStatus.PAUSED
-
-        chunks = await repo.get_chunks(mid)
-        assert len(chunks) == 1
-        assert "Tell me about yourself" in chunks[0].text
-
-        # resume
-        await ctrl.resume(mic_device=1)
-        meeting = await repo.get_meeting(mid)
-        assert meeting.status == MeetingStatus.ACTIVE
-
-        # more transcription
         ctrl._on_transcription_segment(_segment("I have 10 years of experience.", 4.0, 7.0))
 
         # finish

@@ -9,17 +9,13 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
 
 class ControlBar(QWidget):
-    """Horizontal button bar: Start / Pause / Resume / Finish."""
+    """Horizontal button bar: Start / Finish / Upload."""
 
     class State(Enum):
         IDLE = auto()       # no meeting running
         ACTIVE = auto()     # capturing & transcribing
-        PAUSED = auto()     # paused mid-meeting
-        FINISHED = auto()   # just finished, resetting
 
     start_requested = Signal()
-    pause_requested = Signal()
-    resume_requested = Signal()
     finish_requested = Signal()
     upload_requested = Signal()
 
@@ -30,14 +26,10 @@ class ControlBar(QWidget):
         layout.setSpacing(8)
 
         self._start_btn = QPushButton("Start")
-        self._pause_btn = QPushButton("Pause")
-        self._resume_btn = QPushButton("Resume")
         self._finish_btn = QPushButton("Finish")
         self._upload_btn = QPushButton("Upload")
 
         layout.addWidget(self._start_btn)
-        layout.addWidget(self._pause_btn)
-        layout.addWidget(self._resume_btn)
         layout.addWidget(self._finish_btn)
         layout.addWidget(self._upload_btn)
         layout.addStretch()
@@ -54,8 +46,6 @@ class ControlBar(QWidget):
 
         # connect
         self._start_btn.clicked.connect(self.start_requested.emit)
-        self._pause_btn.clicked.connect(self.pause_requested.emit)
-        self._resume_btn.clicked.connect(self.resume_requested.emit)
         self._finish_btn.clicked.connect(self.finish_requested.emit)
         self._upload_btn.clicked.connect(self.upload_requested.emit)
 
@@ -65,9 +55,7 @@ class ControlBar(QWidget):
     def set_state(self, state: State) -> None:
         """Enable / disable buttons based on meeting state."""
         self._start_btn.setEnabled(state == self.State.IDLE)
-        self._pause_btn.setEnabled(state == self.State.ACTIVE)
-        self._resume_btn.setEnabled(state == self.State.PAUSED)
-        self._finish_btn.setEnabled(state in (self.State.ACTIVE, self.State.PAUSED))
+        self._finish_btn.setEnabled(state == self.State.ACTIVE)
 
     def set_upload_enabled(self, enabled: bool) -> None:
         self._upload_btn.setEnabled(enabled)

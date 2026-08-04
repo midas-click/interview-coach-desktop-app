@@ -129,7 +129,7 @@ class TranscriptionEngine:
 
         self._running = False
         self._thread: threading.Thread | None = None
-        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._executor: ThreadPoolExecutor | None = None
         self._on_segment: SegmentCallback | None = None
         self._final_segments: list[TranscriptionSegment] = []
 
@@ -146,6 +146,14 @@ class TranscriptionEngine:
             return
         self._running = True
         self._on_segment = on_segment
+
+        # Fresh state for each session — the executor dies on stop().
+        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._buffers = {"mic": deque(), "sys": deque()}
+        self._buffer_lens = {"mic": 0, "sys": 0}
+        self._sample_offsets = {"mic": 0.0, "sys": 0.0}
+        self._jobs_in_flight = {"mic": False, "sys": False}
+
         self._thread = threading.Thread(
             target=self._worker, args=(audio_queue,),
             daemon=True, name="transcriber",
@@ -157,7 +165,9 @@ class TranscriptionEngine:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=30.0)
         # Wait for any in-flight transcription to finish.
-        self._executor.shutdown(wait=True)
+        if self._executor:
+            self._executor.shutdown(wait=True)
+            self._executor = None
         # Flush whatever audio remains in the buffers.
         self._final_segments = self._flush()
         return self._final_segments

@@ -74,12 +74,6 @@ class MainWindow(QMainWindow):
         self._controls.start_requested.connect(
             lambda: asyncio.ensure_future(self._on_start())
         )
-        self._controls.pause_requested.connect(
-            lambda: asyncio.ensure_future(self._on_pause())
-        )
-        self._controls.resume_requested.connect(
-            lambda: asyncio.ensure_future(self._on_resume())
-        )
         self._controls.finish_requested.connect(
             lambda: asyncio.ensure_future(self._on_finish())
         )
@@ -116,14 +110,10 @@ class MainWindow(QMainWindow):
             reply = QMessageBox.question(
                 self,
                 "Recover Meeting",
-                f"Found an unfinished meeting ({mid}). Resume it?",
+                f"Found an unfinished meeting ({mid}). Finalise it?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply == QMessageBox.StandardButton.Yes:
-                await self._controller.resume()
-                self._start_elapsed()
-                self._controls.set_state(ControlBar.State.ACTIVE)
-            else:
                 await self._controller.finish()
 
     async def _on_start(self) -> None:
@@ -151,24 +141,10 @@ class MainWindow(QMainWindow):
         except Exception:
             log.exception("Start failed")
 
-    async def _on_pause(self) -> None:
-        log.info("Pause button clicked")
-        await self._controller.pause()
-        self._elapsed_timer.stop()
-        self._controls.set_state(ControlBar.State.PAUSED)
-
-    async def _on_resume(self) -> None:
-        log.info("Resume button clicked")
-        mic_dev = self._dashboard.selected_mic_device
-        sys_dev = self._dashboard.selected_sys_device
-        await self._controller.resume(mic_device=mic_dev, sys_device=sys_dev)
-        self._start_elapsed()
-        self._controls.set_state(ControlBar.State.ACTIVE)
-
     async def _on_finish(self) -> None:
         log.info("Finish button clicked")
         self._elapsed_timer.stop()
-        self._controls.set_state(ControlBar.State.FINISHED)
+        self._controls.set_state(ControlBar.State.IDLE)
 
         try:
             self._dashboard.set_status("Finalising…")
