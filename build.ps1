@@ -31,7 +31,6 @@ Write-Host "[2/3] Building $name.exe..." -ForegroundColor Yellow
     --onedir `
     --windowed `
     --name $name `
-    --add-data "models;models" `
     --add-data "icon.png;." `
     --add-data ".venv\Lib\site-packages\faster_whisper\assets\silero_vad_v6.onnx;faster_whisper\assets" `
     --add-data ".venv\Lib\site-packages\_sounddevice_data\portaudio-binaries;_sounddevice_data\portaudio-binaries" `
@@ -43,6 +42,7 @@ Write-Host "[2/3] Building $name.exe..." -ForegroundColor Yellow
     --hidden-import boto3 `
     --hidden-import pydantic_settings `
     --hidden-import numpy `
+    --version-file version.py `
     --noupx `
     --clean `
     --noconfirm `

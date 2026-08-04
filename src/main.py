@@ -98,17 +98,20 @@ def main() -> None:
     app.setApplicationVersion("0.1.0")
 
     # --- config & logging ------------------------------------------------
-    settings = Settings()
-
-    # When running as a frozen bundle, use paths relative to the app dir
-    # and auto-detect the bundled whisper model.
+    # In frozen mode, load .env from the exe's folder so users can edit
+    # settings without touching the _internal bundle.
     if getattr(sys, "frozen", False):
-        base = _app_dir()
-        settings.output_dir = base / "output"
-        settings.log_file = base / "logs" / "transcriber.log"
-        bundled_model = base / "models" / "whisper-base"
-        if bundled_model.exists():
-            settings.whisper_model = str(bundled_model)
+        root = Path(sys.executable).parent
+        settings = Settings(_env_file=str(root / ".env"))
+        settings.output_dir = root / "output"
+        settings.log_file = root / "logs" / "notepadder.log"
+        model_path = root / "models" / "whisper-base"
+        # Only override the default — if the user set a different model
+        # in .env, respect their choice.
+        if model_path.exists() and settings.whisper_model == "base":
+            settings.whisper_model = str(model_path)
+    else:
+        settings = Settings()
 
     setup_logging(settings)
     log = get_logger(__name__)

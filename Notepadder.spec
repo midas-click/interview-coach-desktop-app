@@ -5,7 +5,7 @@ a = Analysis(
     ['src\\main.py'],
     pathex=[],
     binaries=[],
-    datas=[('models', 'models'), ('icon.png', '.'), ('.venv\\Lib\\site-packages\\faster_whisper\\assets\\silero_vad_v6.onnx', 'faster_whisper\\assets'), ('.venv\\Lib\\site-packages\\_sounddevice_data\\portaudio-binaries', '_sounddevice_data\\portaudio-binaries')],
+    datas=[('icon.png', '.'), ('.venv\\Lib\\site-packages\\faster_whisper\\assets\\silero_vad_v6.onnx', 'faster_whisper\\assets'), ('.venv\\Lib\\site-packages\\_sounddevice_data\\portaudio-binaries', '_sounddevice_data\\portaudio-binaries')],
     hiddenimports=['faster_whisper', 'sounddevice', 'soundcard', 'qasync', 'aiosqlite', 'boto3', 'pydantic_settings', 'numpy'],
     hookspath=[],
     hooksconfig={},
@@ -32,6 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version='version.py',
 )
 coll = COLLECT(
     exe,
