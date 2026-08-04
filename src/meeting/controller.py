@@ -120,7 +120,7 @@ class MeetingController:
         self._flush_task = asyncio.create_task(self._flush_loop())
 
         await self._repo.start_meeting(self._meeting_id)
-        self._notify_status("active")
+        self._notify_status("Actively listening…")
 
     async def finish(self) -> dict:
         """Stop everything, finalise, export JSON + TXT, return JSON payload."""
@@ -136,14 +136,16 @@ class MeetingController:
                 c.meeting_id = self._meeting_id  # type: ignore[assignment]
             self._pending_chunks.extend(chunks)
 
+        self._notify_status("Saving transcript…")
         await self._persist_pending()
         self._stop_flush_loop()
         await self._repo.finish_meeting(self._meeting_id)  # type: ignore[arg-type]
-        self._notify_status("finished")
 
+        self._notify_status("Generating JSON…")
         export = await self._repo.export_transcript(self._meeting_id)  # type: ignore[arg-type]
         txt = await self._repo.export_txt(self._meeting_id)  # type: ignore[arg-type]
         self._save_txt_local(txt)
+        self._notify_status("Ready")
         return export
 
     async def export_current(self) -> dict:

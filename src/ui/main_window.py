@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QFileDialog,
+    QLabel,
     QMainWindow,
     QMessageBox,
     QVBoxLayout,
@@ -85,8 +86,13 @@ class MainWindow(QMainWindow):
             lambda: asyncio.ensure_future(self._on_upload())
         )
 
+        # status bar — permanent right-aligned label
+        self._status_lbl = QLabel("Idle")
+        self._status_lbl.setStyleSheet("color: #888; font-size: 12px;")
+        self.statusBar().addPermanentWidget(self._status_lbl)
+
         # controller callbacks → UI
-        self._controller.on_status_change = self._dashboard.set_status
+        self._controller.on_status_change = self._set_status
         self._controller.on_chunks_persisted = self._on_chunks_persisted
 
         # elapsed timer
@@ -99,6 +105,7 @@ class MainWindow(QMainWindow):
         self._restore_device_state()
 
         # initial state
+        self._set_status("Idle")
         self._controls.set_state(ControlBar.State.IDLE)
 
         # check for crash recovery
@@ -107,6 +114,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # slots
     # ------------------------------------------------------------------
+
+    def _set_status(self, text: str) -> None:
+        self._status_lbl.setText(text)
 
     async def _check_recovery(self) -> None:
         mid = await self._controller.recover_active_meeting()
@@ -125,7 +135,6 @@ class MainWindow(QMainWindow):
         self._controls.set_word_count(0)
         self._controls.set_upload_enabled(False)
         self._controls.set_download_enabled(False)
-        self._dashboard.set_upload_status("—")
         self._save_device_state()
         try:
             log.info("Start button clicked")
@@ -152,20 +161,19 @@ class MainWindow(QMainWindow):
         self._controls.set_state(ControlBar.State.IDLE)
 
         try:
-            self._dashboard.set_status("Finalising…")
+            self._set_status("Finalising…")
             await self._controller.finish()
         except Exception:
             log.exception("Finish failed")
 
-        self._dashboard.set_status("Idle")
-        self._dashboard.set_upload_status("Ready to upload")
-        self._dashboard.reset_inputs()
         self._controls.set_state(ControlBar.State.IDLE)
         self._controls.set_upload_enabled(True)
         self._controls.set_download_enabled(True)
+        self._dashboard.reset_inputs()
 
     async def _on_download(self) -> None:
         try:
+            self._set_status("Downloading JSON…")
             export = await self._controller.export_current()
             mid = self._controller.meeting_id or "transcript"
             path, _ = QFileDialog.getSaveFileName(
@@ -174,20 +182,20 @@ class MainWindow(QMainWindow):
             )
             if path:
                 Path(path).write_text(json.dumps(export, indent=2), encoding="utf-8")
-                self._dashboard.set_upload_status("Downloaded ✓")
+                self._set_status("Download complete")
         except Exception as exc:
             log.exception("Download failed")
-            self._dashboard.set_upload_status(f"Failed: {exc}")
+            self._set_status(f"Download failed: {exc}")
 
     async def _on_upload(self) -> None:
         try:
-            self._dashboard.set_upload_status("Uploading…")
+            self._set_status("Uploading…")
             export = await self._controller.export_current()
             await self._uploader.upload(export, self._controller.meeting_id or "unknown")
-            self._dashboard.set_upload_status("Uploaded ✓")
+            self._set_status("Upload complete")
         except Exception as exc:
             log.exception("Upload failed")
-            self._dashboard.set_upload_status(f"Failed: {exc}")
+            self._set_status(f"Upload failed: {exc}")
 
     def _on_chunks_persisted(self, chunks) -> None:
         self._transcript.append_chunks(chunks)

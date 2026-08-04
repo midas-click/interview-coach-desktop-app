@@ -73,14 +73,7 @@ class Dashboard(QFrame):
         self.sys_combo.setMaximumWidth(200)
         grid.addWidget(self.sys_combo, 2, 3)
 
-        # row 3 — status + upload
-        grid.addWidget(_label("Status:"), 3, 0)
-        self.status_lbl = QLabel("Idle")
-        grid.addWidget(self.status_lbl, 3, 1)
-
-        grid.addWidget(_label("Upload:"), 3, 2)
-        self.upload_lbl = QLabel("—")
-        grid.addWidget(self.upload_lbl, 3, 3)
+        # row 3 — (removed: status now in control bar)
 
     # -- public ----------------------------------------------------------
 
@@ -110,13 +103,6 @@ class Dashboard(QFrame):
         self.mic_combo.setEnabled(True)
         self.sys_combo.setEnabled(True)
         self.meeting_id_lbl.setText("—")
-        self.upload_lbl.setText("—")
-
-    def set_status(self, status: str) -> None:
-        self.status_lbl.setText(status)
-
-    def set_upload_status(self, text: str) -> None:
-        self.upload_lbl.setText(text)
 
     # -- device population ----------------------------------------------
 
