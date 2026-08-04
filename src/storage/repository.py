@@ -119,20 +119,6 @@ class Repository:
             row = await cursor.fetchone()
             return self._row_to_meeting(row) if row else None
 
-    async def get_active_meeting(self) -> Meeting | None:
-        """Return a meeting with status 'active' or 'paused' (crash recovery).
-
-        Returns the most recently created one if multiple exist.
-        """
-        async with aiosqlite.connect(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM meetings WHERE status = 'active' "
-                "ORDER BY created_at DESC LIMIT 1"
-            )
-            row = await cursor.fetchone()
-            return self._row_to_meeting(row) if row else None
-
     # ------------------------------------------------------------------
     # transcript chunks
     # ------------------------------------------------------------------

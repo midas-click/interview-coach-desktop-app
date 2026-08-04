@@ -117,27 +117,3 @@ def test_start_without_meeting_raises(tmp_path: Path) -> None:
             await ctrl.start()
 
     asyncio.run(_test())
-
-
-def test_recover_active_meeting(tmp_path: Path) -> None:
-    ctrl, repo, _, _ = _make_controller(tmp_path)
-
-    async def _test():
-        await repo.create_meeting("recover-123")
-        await repo.start_meeting("recover-123")
-
-        mid = await ctrl.recover_active_meeting()
-        assert mid == "recover-123"
-        assert ctrl.meeting_id == "recover-123"
-
-    asyncio.run(_test())
-
-
-def test_recover_no_active_meeting(tmp_path: Path) -> None:
-    ctrl, _, _, _ = _make_controller(tmp_path)
-
-    async def _test():
-        mid = await ctrl.recover_active_meeting()
-        assert mid is None
-
-    asyncio.run(_test())

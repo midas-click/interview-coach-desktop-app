@@ -21,7 +21,7 @@ class TranscriptView(QFrame):
 
         self._editor = QTextEdit()
         self._editor.setReadOnly(True)
-        font = QFont("Segoe UI", 11)
+        font = QFont("Segoe UI", 9)
         self._editor.setFont(font)
         self._editor.setPlaceholderText("Transcription will appear here…")
         layout.addWidget(self._editor)

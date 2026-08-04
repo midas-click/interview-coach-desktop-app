@@ -164,21 +164,6 @@ class MeetingController:
         (dir_path / "transcript.txt").write_text(text, encoding="utf-8")
 
     # ------------------------------------------------------------------
-    # crash recovery
-    # ------------------------------------------------------------------
-
-    async def recover_active_meeting(self) -> str | None:
-        """Check for an unfinished meeting from a previous run.
-
-        Returns the meeting ID if found, otherwise ``None``.
-        """
-        meeting = await self._repo.get_active_meeting()
-        if meeting is None:
-            return None
-        self._meeting_id = meeting.meeting_id
-        return meeting.meeting_id
-
-    # ------------------------------------------------------------------
     # transcription callback (worker thread)
     # ------------------------------------------------------------------
 

@@ -8,15 +8,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QTimer
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
     QMainWindow,
-    QMessageBox,
+    QMenu,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
@@ -50,8 +53,9 @@ class MainWindow(QMainWindow):
         self._controller = controller
         self._uploader = uploader
 
-        self.setWindowTitle("Interview Transcriber")
+        self.setWindowTitle("Notepadder")
         self.setMinimumSize(600, 420)
+        self._load_icon()
 
         # -- central widget -------------------------------------------------
         central = QWidget()
@@ -87,6 +91,7 @@ class MainWindow(QMainWindow):
         )
 
         # status bar — permanent right-aligned label
+        self.statusBar().setStyleSheet("QStatusBar { margin: 2px 8px 2px 0px; }")
         self._status_lbl = QLabel("Idle")
         self._status_lbl.setStyleSheet("color: #888; font-size: 12px;")
         self.statusBar().addPermanentWidget(self._status_lbl)
@@ -108,8 +113,59 @@ class MainWindow(QMainWindow):
         self._set_status("Idle")
         self._controls.set_state(ControlBar.State.IDLE)
 
-        # check for crash recovery
-        asyncio.ensure_future(self._check_recovery())
+        # tray icon
+        self._tray = QSystemTrayIcon(self)
+        self._tray.activated.connect(self._on_tray_activated)
+        tray_menu = QMenu()
+        tray_menu.addAction("Show", self._show_from_tray)
+        tray_menu.addAction("Quit", self._really_quit)
+        self._tray.setContextMenu(tray_menu)
+        if not self.windowIcon().isNull():
+            self._tray.setIcon(self.windowIcon())
+        self._tray.setToolTip("Notepadder")
+
+    def _load_icon(self) -> None:
+        """Load app icon.  Looks next to the exe in frozen mode, or in
+        the project root during development."""
+        if getattr(sys, "frozen", False):
+            base = Path(sys.executable).parent
+            internal = base / "_internal"
+            root = internal if internal.exists() else base
+        else:
+            root = Path(__file__).resolve().parent.parent.parent
+        icon_path = root / "icon.png"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+
+    # ------------------------------------------------------------------
+    # tray icon
+    # ------------------------------------------------------------------
+
+    def changeEvent(self, event) -> None:
+        if event.type() == event.Type.WindowStateChange and self.isMinimized():
+            self.hide()
+            self._tray.show()
+            event.ignore()
+        else:
+            super().changeEvent(event)
+
+    def closeEvent(self, event) -> None:
+        self._tray.hide()
+        super().closeEvent(event)
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._show_from_tray()
+
+    def _show_from_tray(self) -> None:
+        self._tray.hide()
+        self.showNormal()
+        self.activateWindow()
+
+    def _really_quit(self) -> None:
+        self._tray.hide()
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance().quit()
 
     # ------------------------------------------------------------------
     # slots
@@ -117,18 +173,6 @@ class MainWindow(QMainWindow):
 
     def _set_status(self, text: str) -> None:
         self._status_lbl.setText(text)
-
-    async def _check_recovery(self) -> None:
-        mid = await self._controller.recover_active_meeting()
-        if mid is not None:
-            reply = QMessageBox.question(
-                self,
-                "Recover Meeting",
-                f"Found an unfinished meeting ({mid}). Finalise it?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                await self._controller.finish()
 
     async def _on_start(self) -> None:
         self._transcript.clear()

@@ -83,9 +83,18 @@ DB_PATH = _app_dir() / "data" / "transcriber.db"
 
 
 def main() -> None:
+    # Windows taskbar icon — must be set before QApplication is shown.
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "notepadder.app"
+        )
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
-    app.setApplicationName("Interview Transcriber")
-    app.setOrganizationName("InterviewCoach")
+    app.setApplicationName("Notepadder")
+    app.setOrganizationName("Notepadder")
     app.setApplicationVersion("0.1.0")
 
     # --- config & logging ------------------------------------------------
@@ -121,6 +130,9 @@ def main() -> None:
 
     # --- UI --------------------------------------------------------------
     window = MainWindow(settings, controller, uploader)
+    # Set the app-level icon too so the taskbar picks it up.
+    if not window.windowIcon().isNull():
+        app.setWindowIcon(window.windowIcon())
     window.show()
 
     log.info("Main window shown")
