@@ -1,9 +1,9 @@
-# Build standalone Windows .exe for Interview Transcriber
+# Build standalone Windows .exe for Notepadder
 # Usage: .\build.ps1
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "=== Interview Transcriber - Standalone Build ===" -ForegroundColor Cyan
+Write-Host "=== Notepadder - Standalone Build ===" -ForegroundColor Cyan
 
 # --- check Python -----------------------------------------------------------
 $python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
@@ -22,7 +22,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # --- build ------------------------------------------------------------------
-$name = "InterviewTranscriber"
+$name = "Notepadder"
 $main = "src/main.py"
 
 Write-Host ""
@@ -32,18 +32,18 @@ Write-Host "[2/3] Building $name.exe..." -ForegroundColor Yellow
     --windowed `
     --name $name `
     --add-data "models;models" `
+    --add-data "icon.png;." `
     --add-data ".venv\Lib\site-packages\faster_whisper\assets\silero_vad_v6.onnx;faster_whisper\assets" `
     --add-data ".venv\Lib\site-packages\_sounddevice_data\portaudio-binaries;_sounddevice_data\portaudio-binaries" `
     --hidden-import faster_whisper `
     --hidden-import sounddevice `
     --hidden-import soundcard `
-    --hidden-import pyaudio `
     --hidden-import qasync `
     --hidden-import aiosqlite `
     --hidden-import boto3 `
     --hidden-import pydantic_settings `
-    --hidden-import yaml `
     --hidden-import numpy `
+    --noupx `
     --clean `
     --noconfirm `
     $main
