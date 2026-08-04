@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
+    QFileDialog,
     QMainWindow,
     QMessageBox,
     QVBoxLayout,
@@ -77,6 +78,9 @@ class MainWindow(QMainWindow):
         self._controls.finish_requested.connect(
             lambda: asyncio.ensure_future(self._on_finish())
         )
+        self._controls.download_requested.connect(
+            lambda: asyncio.ensure_future(self._on_download())
+        )
         self._controls.upload_requested.connect(
             lambda: asyncio.ensure_future(self._on_upload())
         )
@@ -120,6 +124,7 @@ class MainWindow(QMainWindow):
         self._transcript.clear()
         self._controls.set_word_count(0)
         self._controls.set_upload_enabled(False)
+        self._controls.set_download_enabled(False)
         self._dashboard.set_upload_status("—")
         self._save_device_state()
         try:
@@ -157,6 +162,22 @@ class MainWindow(QMainWindow):
         self._dashboard.reset_inputs()
         self._controls.set_state(ControlBar.State.IDLE)
         self._controls.set_upload_enabled(True)
+        self._controls.set_download_enabled(True)
+
+    async def _on_download(self) -> None:
+        try:
+            export = await self._controller.export_current()
+            mid = self._controller.meeting_id or "transcript"
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save Transcript", f"{mid}.json",
+                "JSON Files (*.json)",
+            )
+            if path:
+                Path(path).write_text(json.dumps(export, indent=2), encoding="utf-8")
+                self._dashboard.set_upload_status("Downloaded ✓")
+        except Exception as exc:
+            log.exception("Download failed")
+            self._dashboard.set_upload_status(f"Failed: {exc}")
 
     async def _on_upload(self) -> None:
         try:

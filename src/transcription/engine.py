@@ -249,7 +249,7 @@ class TranscriptionEngine:
 
         raw_segments, _info = self._model.transcribe(
             audio,
-            vad_filter=False,
+            vad_filter=True,
             word_timestamps=True,
             language="en",
             beam_size=5,
@@ -296,7 +296,7 @@ class TranscriptionEngine:
 
             raw_segments, _info = self._model.transcribe(
                 audio,
-                vad_filter=False,
+                vad_filter=True,
                 word_timestamps=True,
                 language="en",
                 beam_size=5,
