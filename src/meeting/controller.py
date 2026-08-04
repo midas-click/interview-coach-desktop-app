@@ -80,18 +80,6 @@ class MeetingController:
     def meeting_id(self) -> str | None:
         return self._meeting_id
 
-    @property
-    def is_active(self) -> bool:
-        return self._audio.is_any_running
-
-    @property
-    def microphone_active(self) -> bool:
-        return self._audio.microphone_state.name == "RUNNING"
-
-    @property
-    def system_audio_active(self) -> bool:
-        return self._audio.system_audio_state.name == "RUNNING"
-
     # ------------------------------------------------------------------
     # lifecycle
     # ------------------------------------------------------------------

@@ -33,6 +33,7 @@ Write-Host "[2/3] Building $name.exe..." -ForegroundColor Yellow
     --name $name `
     --add-data "models;models" `
     --add-data ".venv\Lib\site-packages\faster_whisper\assets\silero_vad_v6.onnx;faster_whisper\assets" `
+    --add-data ".venv\Lib\site-packages\_sounddevice_data\portaudio-binaries;_sounddevice_data\portaudio-binaries" `
     --hidden-import faster_whisper `
     --hidden-import sounddevice `
     --hidden-import soundcard `

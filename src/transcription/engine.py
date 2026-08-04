@@ -1,11 +1,12 @@
 """faster-whisper transcription engine running in a background thread.
 
 Pulls ``AudioChunk`` objects from a queue, routes them by source into
-separate buffers, transcribes each independently, and emits segments
-with the correct speaker label.
+separate buffers, transcribes each independently in a dedicated
+executor thread, and emits segments with the correct speaker label.
 
-Audio is expected at 16 kHz.  If a device doesn't support 16 kHz the
-capture layer falls back to its native rate, and we resample here.
+Audio is expected at 16 kHz.  When a device doesn't natively support
+16 kHz the capture layer falls back to its native rate, and we
+resample here.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ from __future__ import annotations
 import queue
 import threading
 from collections import deque
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -27,9 +30,31 @@ SAMPLE_RATE = 16000
 
 
 def _resample(audio: np.ndarray, src_rate: int) -> np.ndarray:
-    """Resample to 16 kHz when a device doesn't support it natively."""
+    """Resample to 16 kHz when a device doesn't support it natively.
+
+    For integer-ratio downsampling (e.g. 48→16 kHz, factor 3) uses
+    sample averaging which provides basic anti-aliasing.  For non-integer
+    ratios falls back to linear interpolation with a warning.
+    """
     if src_rate == SAMPLE_RATE:
         return audio
+
+    if src_rate % SAMPLE_RATE == 0:
+        # Integer-ratio decimation via averaging — acts as a crude
+        # low-pass filter at fs / (2 * factor).
+        factor = src_rate // SAMPLE_RATE
+        trimmed_len = len(audio) - len(audio) % factor
+        if trimmed_len == 0:
+            return np.array([], dtype=np.float32)
+        return audio[:trimmed_len].reshape(-1, factor).mean(axis=1).astype(np.float32)
+
+    # Non-integer ratio — rare (e.g. 44100→16000).  Linear interpolation
+    # is a poor resampler, but this path is only hit on unusual hardware.
+    log.warning(
+        "Non-integer resampling %d→%d Hz — transcription quality may suffer. "
+        "Consider using a 16 kHz or 48 kHz device.",
+        src_rate, SAMPLE_RATE,
+    )
     new_len = int(len(audio) * SAMPLE_RATE / src_rate)
     old_idx = np.arange(len(audio), dtype=np.float64)
     new_idx = np.linspace(0, len(audio) - 1, new_len, dtype=np.float64)
@@ -70,6 +95,9 @@ class TranscriptionEngine:
 
     Maintains two independent audio buffers (mic / system audio) so
     each transcribed segment can be tagged with the correct speaker.
+
+    Audio ingestion runs in a worker thread.  Transcription is offloaded
+    to a single-thread executor so the worker never blocks on the model.
     """
 
     def __init__(
@@ -92,8 +120,16 @@ class TranscriptionEngine:
         self._buffer_lens: dict[str, int] = {"mic": 0, "sys": 0}
         self._lock = threading.Lock()
 
+        # Sample-count-based clock — avoids clock drift between the
+        # system monotonic clock and the audio device hardware clock.
+        self._sample_offsets: dict[str, float] = {"mic": 0.0, "sys": 0.0}
+
+        # Prevent piling up concurrent transcription jobs for one source.
+        self._jobs_in_flight: dict[str, bool] = {"mic": False, "sys": False}
+
         self._running = False
         self._thread: threading.Thread | None = None
+        self._executor = ThreadPoolExecutor(max_workers=1)
         self._on_segment: SegmentCallback | None = None
         self._final_segments: list[TranscriptionSegment] = []
 
@@ -120,10 +156,14 @@ class TranscriptionEngine:
         self._running = False
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=30.0)
+        # Wait for any in-flight transcription to finish.
+        self._executor.shutdown(wait=True)
+        # Flush whatever audio remains in the buffers.
+        self._final_segments = self._flush()
         return self._final_segments
 
     # ----------------------------------------------------------------
-    # worker loop
+    # worker loop (audio ingestion — never blocks on transcription)
     # ----------------------------------------------------------------
 
     def _worker(self, audio_queue: queue.Queue[AudioChunk]) -> None:
@@ -142,66 +182,98 @@ class TranscriptionEngine:
                 data = _resample(chunk.data, chunk.sample_rate)
                 key = _buffer_key(chunk.source)
                 with self._lock:
-                    self._buffers[key].append((data, chunk.timestamp))
+                    # Use sample-count timestamps so timing stays locked
+                    # to the audio hardware clock, not the system clock.
+                    ts = self._sample_offsets[key]
+                    self._buffers[key].append((data, ts))
                     self._buffer_lens[key] += len(data)
+                    self._sample_offsets[key] += len(data) / SAMPLE_RATE
                 self._drain_buffers()
             except Exception:
                 log.exception("Worker failed processing audio chunk")
 
-        self._final_segments = self._flush()
         log.info("Transcription worker stopped")
 
-    def _drain_idle(self) -> None:
-        for key in ("mic", "sys"):
-            if self._buffer_lens[key] >= SAMPLE_RATE * 1.0:
-                self._transcribe_buffer(key)
+    # ----------------------------------------------------------------
+    # drain helpers — never call model.transcribe() here
+    # ----------------------------------------------------------------
 
     def _drain_buffers(self) -> None:
         min_samples = int(SAMPLE_RATE * self._buffer_duration)
         for key in ("mic", "sys"):
-            if self._buffer_lens[key] >= min_samples:
-                self._transcribe_buffer(key)
+            self._maybe_submit(key, min_samples)
 
-    # ----------------------------------------------------------------
-    # transcription
-    # ----------------------------------------------------------------
+    def _drain_idle(self) -> None:
+        """Called when no new chunks arrived for 0.5 s — flush partial buffers."""
+        for key in ("mic", "sys"):
+            self._maybe_submit(key, int(SAMPLE_RATE * 1.0))
 
-    def _transcribe_buffer(self, key: str) -> None:
+    def _maybe_submit(self, key: str, min_samples: int) -> None:
+        """If *key* has enough audio and no job is in flight, submit a
+        transcription task to the executor."""
         with self._lock:
-            buf_len = self._buffer_lens[key]
-            if buf_len == 0:
+            if self._buffer_lens[key] < min_samples or self._jobs_in_flight[key]:
                 return
+            self._jobs_in_flight[key] = True
             audio, base_timestamp = self._assemble_buffer(key)
-            keep = min(int(SAMPLE_RATE * self._overlap_duration), buf_len)
+            keep = min(int(SAMPLE_RATE * self._overlap_duration), self._buffer_lens[key])
             self._trim_buffer(key, keep)
 
-        duration = len(audio) / SAMPLE_RATE
-        log.debug("Transcribing %.1fs of %s audio", duration, key)
-        try:
-            segments, _info = self._model.transcribe(
-                audio,
-                vad_filter=True,
-                vad_parameters={"threshold": 0.3},
-                word_timestamps=True,
-                language="en",
-                beam_size=5,
-                best_of=1,
-                condition_on_previous_text=False,
-                compression_ratio_threshold=2.4,
-            )
+        future = self._executor.submit(
+            self._transcribe_audio, audio, base_timestamp, key,
+        )
+        future.add_done_callback(
+            lambda f, k=key: self._on_transcription_done(f, k),
+        )
 
-            seg_count = 0
-            for seg in segments:
-                seg_count += 1
-                self._emit(self._make_segment(seg, base_timestamp, key))
-            if seg_count:
-                log.info("Transcribed %d segment(s) from %s", seg_count, key)
-            else:
-                log.debug("No speech detected in %.1fs of %s audio", duration, key)
+    # ----------------------------------------------------------------
+    # transcription (runs in executor thread)
+    # ----------------------------------------------------------------
+
+    def _transcribe_audio(
+        self, audio: np.ndarray, base_timestamp: float, key: str,
+    ) -> list[TranscriptionSegment]:
+        duration = len(audio) / SAMPLE_RATE
+        rms = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+        log.debug("Transcribing %.1fs of %s audio (RMS: %.4f)", duration, key, rms)
+
+        raw_segments, _info = self._model.transcribe(
+            audio,
+            vad_filter=False,
+            word_timestamps=True,
+            language="en",
+            beam_size=5,
+            best_of=1,
+            condition_on_previous_text=False,
+            compression_ratio_threshold=2.4,
+        )
+        results: list[TranscriptionSegment] = []
+        for seg in raw_segments:
+            results.append(self._make_segment(seg, base_timestamp, key))
+        return results
+
+    def _on_transcription_done(self, future, key: str) -> None:
+        """Callback invoked by the executor when transcription finishes."""
+        try:
+            segments = future.result()
         except Exception:
             log.exception("Transcription failed for %s audio", key)
+            segments = []
+
+        with self._lock:
+            self._jobs_in_flight[key] = False
+
+        seg_count = 0
+        for seg in segments:
+            seg_count += 1
+            self._emit(seg)
+        if seg_count:
+            log.info("Transcribed %d segment(s) from %s", seg_count, key)
+        else:
+            log.debug("No speech detected in %s audio", key)
 
     def _flush(self) -> list[TranscriptionSegment]:
+        """Transcribe all remaining buffered audio synchronously (called at stop)."""
         segments: list[TranscriptionSegment] = []
         for key in ("mic", "sys"):
             with self._lock:
@@ -214,8 +286,7 @@ class TranscriptionEngine:
 
             raw_segments, _info = self._model.transcribe(
                 audio,
-                vad_filter=True,
-                vad_parameters={"threshold": 0.3},
+                vad_filter=False,
                 word_timestamps=True,
                 language="en",
                 beam_size=5,
@@ -280,7 +351,5 @@ class TranscriptionEngine:
 # ---------------------------------------------------------------------------
 # types
 # ---------------------------------------------------------------------------
-
-from collections.abc import Callable
 
 SegmentCallback = Callable[[TranscriptionSegment], None]

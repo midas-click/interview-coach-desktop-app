@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 import sounddevice as sd
+from sounddevice import PortAudioError
 
 from src.logger.logger import get_logger
 
@@ -53,9 +54,9 @@ def _wasapi_host_api_index() -> int | None:
 
 
 def list_microphones() -> list[dict[str, Any]]:
-    """Real hardware microphone devices (deduped, best host API)."""
+    """All input devices (deduped, best host API)."""
     all_devs = _query_all()
-    mics = [d for d in all_devs if d["max_input_channels"] > 0 and _is_real_mic(d["name"])]
+    mics = [d for d in all_devs if d["max_input_channels"] > 0]
     return _deduplicate(mics)
 
 
@@ -79,12 +80,6 @@ def _supports_wasapi_loopback() -> bool:
         return "loopback" in inspect.signature(sd.WasapiSettings).parameters
     except Exception:
         return False
-
-
-def _is_real_mic(name: str) -> bool:
-    lower = name.lower()
-    hints = ("microphone", "mic ", " mic", "headset", "line in", "line-in")
-    return any(h in lower for h in hints)
 
 
 def _query_all() -> list[dict[str, Any]]:
@@ -131,6 +126,75 @@ def _deduplicate(devices: list[dict]) -> list[dict]:
                 groups[key] = d
 
     return sorted(groups.values(), key=lambda d: d["name"])
+
+
+# ---------------------------------------------------------------------------
+# stream-opening helper — tries 16 kHz, falls back to device default
+# ---------------------------------------------------------------------------
+
+_TARGET_RATE = 16000
+
+
+def _query_device_default_rate(device_index: int | None) -> int:
+    """Return the default sample rate for *device_index* (or system default)."""
+    dev = device_index if device_index is not None else sd.default.device[0]
+    try:
+        if dev is not None and dev >= 0:
+            info = sd.query_devices(dev)
+            dr = int(info["default_samplerate"])
+            if dr > 0:
+                return dr
+    except Exception:
+        pass
+    return 44100
+
+
+def _open_input_stream(
+    device_index: int | None,
+    channels: int,
+    chunk_duration: float,
+    callback,
+    extra_settings=None,
+) -> tuple[sd.InputStream, int]:
+    """Open an InputStream at *_TARGET_RATE* (16 kHz).
+
+    Falls back to the device's default sample rate if the device
+    doesn't support 16 kHz.  Returns (stream, actual_sample_rate).
+    """
+    rates_to_try = [_TARGET_RATE]
+    try:
+        default_rate = _query_device_default_rate(device_index)
+        if default_rate != _TARGET_RATE:
+            rates_to_try.append(default_rate)
+    except Exception:
+        pass
+
+    last_err: Exception | None = None
+    for rate in rates_to_try:
+        try:
+            stream = sd.InputStream(
+                device=device_index,
+                channels=channels,
+                samplerate=rate,
+                dtype="float32",
+                blocksize=int(rate * chunk_duration),
+                callback=callback,
+                **(extra_settings or {}),
+            )
+            stream.start()
+            actual = int(stream.samplerate)
+            if actual != _TARGET_RATE:
+                _log.warning(
+                    "Device opened at %d Hz (requested %d) — resampling will be applied",
+                    actual, rate,
+                )
+            return stream, actual
+        except PortAudioError as exc:
+            last_err = exc
+            _log.debug("Failed to open at %d Hz: %s", rate, exc)
+            continue
+
+    raise last_err  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
@@ -210,18 +274,12 @@ class AudioCapture:
         self._start_time = time.monotonic()
         self._buffer.clear()
 
-        channels, rate = self._query_input_params()
-        self._sample_rate = rate
-
-        self._stream = sd.InputStream(
-            device=self._device_index,
-            channels=channels,
-            samplerate=rate,
-            dtype="float32",
-            blocksize=int(rate * self._chunk_duration),
+        self._stream, self._sample_rate = _open_input_stream(
+            device_index=self._device_index,
+            channels=1,
+            chunk_duration=self._chunk_duration,
             callback=self._on_audio,
         )
-        self._stream.start()
 
     def stop(self) -> None:
         if self._stream is not None:
@@ -231,21 +289,6 @@ class AudioCapture:
         self._queue = None
         with self._lock:
             self._buffer.clear()
-
-    def _query_input_params(self) -> tuple[int, int]:
-        channels = 1
-        rate = 44100
-        dev = self._device_index if self._device_index is not None else sd.default.device[0]
-        try:
-            if dev is not None and dev >= 0:
-                info = sd.query_devices(dev)
-                channels = max(info["max_input_channels"], 1)
-                dr = int(info["default_samplerate"])
-                if dr > 0:
-                    rate = dr
-        except Exception:
-            pass
-        return channels, rate
 
     def _on_audio(self, indata: np.ndarray, frames: int, _time: Any, status: int) -> None:
         del frames, status  # unused callback args
@@ -298,20 +341,13 @@ class LoopbackCapture:
 
     def _start_wasapi_loopback(self) -> None:
         device = self._resolve_loopback_device()
-        channels = max(device.get("max_output_channels", 2), 2)
-        rate = int(device.get("default_sample_rate", 0) or 44100)
-        self._sample_rate = rate
-
-        self._stream = sd.InputStream(
-            device=device["index"],
-            channels=channels,
-            samplerate=rate,
-            dtype="float32",
-            blocksize=int(rate * self._chunk_duration),
-            extra_settings=sd.WasapiSettings(loopback=True),
+        self._stream, self._sample_rate = _open_input_stream(
+            device_index=device["index"],
+            channels=2,
+            chunk_duration=self._chunk_duration,
             callback=self._on_audio,
+            extra_settings=sd.WasapiSettings(loopback=True),
         )
-        self._stream.start()
 
     def _start_soundcard_loopback(self) -> None:
         import soundcard as sc
@@ -332,7 +368,7 @@ class LoopbackCapture:
                 f"No loopback microphone found for speaker '{speaker.name}'. "
                 f"Install a newer sounddevice for WASAPI loopback support."
             )
-        rate = 44100
+        rate = 16000
         self._sample_rate = rate
         # Create recorder on the main thread (COM must be initialised)
         self._soundcard_recorder = loopback.recorder(samplerate=rate).__enter__()

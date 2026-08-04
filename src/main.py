@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import traceback
 from pathlib import Path
 
 import qasync
@@ -19,6 +20,54 @@ from src.meeting.controller import MeetingController
 from src.storage.repository import Repository
 from src.upload.s3_uploader import S3Uploader
 from src.ui.main_window import MainWindow
+
+# ── Crash logging (catches silent C-level crashes from ctranslate2 / av) ──
+
+_CRASH_DIR = Path(sys.executable).parent / "_internal" / "logs" if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent / "logs"
+_CRASH_LOG = _CRASH_DIR / "crash.log"
+
+
+def _write_crash(exc_type, exc_value, _tb) -> None:
+    _CRASH_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+        f.write(f"\n{'='*60}\n")
+        f.write(f"CRASH: {exc_type.__name__ if exc_type else 'unknown'}: {exc_value}\n")
+        traceback.print_exception(exc_type, exc_value, _tb, file=f)
+
+
+def _install_crash_handler() -> None:
+    sys.excepthook = _write_crash
+    # Catch segfaults / illegal instructions from C extensions
+    try:
+        import signal
+        import ctypes
+
+        def _on_signal(sig, _frame):
+            sig_names = {
+                signal.SIGSEGV: "SIGSEGV (segfault)",
+                signal.SIGABRT: "SIGABRT (abort)",
+                signal.SIGILL: "SIGILL (illegal instruction)",
+                signal.SIGFPE: "SIGFPE (float error)",
+            }
+            name = sig_names.get(sig, f"signal {sig}")
+            _CRASH_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+                f.write(f"\n{'='*60}\n")
+                f.write(f"CRASH: {name}\n")
+                f.write(f"This usually means a C extension (ctranslate2, av) is incompatible with this CPU.\n")
+            sys.exit(1)
+
+        signal.signal(signal.SIGSEGV, _on_signal)
+        signal.signal(signal.SIGABRT, _on_signal)
+        signal.signal(signal.SIGILL, _on_signal)
+        signal.signal(signal.SIGFPE, _on_signal)
+    except Exception:
+        pass  # signal handlers best-effort
+
+
+_install_crash_handler()
+
+# ────────────────────────────────────────────────────────────────────────────
 
 
 def _app_dir() -> Path:

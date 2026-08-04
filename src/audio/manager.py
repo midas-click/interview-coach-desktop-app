@@ -78,13 +78,8 @@ class AudioManager:
     # ------------------------------------------------------------------
 
     def stop_all(self) -> None:
-        with self._lock:
-            if self._mic:
-                self._mic.stop()
-                self._mic = None
-            if self._sys:
-                self._sys.stop()
-                self._sys = None
+        self.stop_microphone()
+        self.stop_system_audio()
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()

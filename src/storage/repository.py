@@ -116,9 +116,6 @@ class Repository:
     async def finish_meeting(self, meeting_id: str) -> None:
         await self._update_status(meeting_id, MeetingStatus.FINISHED)
 
-    async def fail_meeting(self, meeting_id: str) -> None:
-        await self._update_status(meeting_id, MeetingStatus.FAILED)
-
     async def get_meeting(self, meeting_id: str) -> Meeting | None:
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row

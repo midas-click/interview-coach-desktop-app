@@ -5,7 +5,7 @@ a = Analysis(
     ['src\\main.py'],
     pathex=[],
     binaries=[],
-    datas=[('models', 'models'), ('.venv\\Lib\\site-packages\\faster_whisper\\assets\\silero_vad_v6.onnx', 'faster_whisper\\assets')],
+    datas=[('models', 'models'), ('.venv\\Lib\\site-packages\\faster_whisper\\assets\\silero_vad_v6.onnx', 'faster_whisper\\assets'), ('.venv\\Lib\\site-packages\\_sounddevice_data\\portaudio-binaries', '_sounddevice_data\\portaudio-binaries')],
     hiddenimports=['faster_whisper', 'sounddevice', 'soundcard', 'pyaudio', 'qasync', 'aiosqlite', 'boto3', 'pydantic_settings', 'yaml', 'numpy'],
     hookspath=[],
     hooksconfig={},
