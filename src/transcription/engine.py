@@ -27,6 +27,8 @@ from src.logger.logger import get_logger
 log = get_logger(__name__)
 
 SAMPLE_RATE = 16000
+CONFIDENCE_THRESHOLD = -0.8   # avg_logprob below → hallucination, discard
+MIN_WORDS = 2                # fewer words → noise, discard
 
 
 def _resample(audio: np.ndarray, src_rate: int) -> np.ndarray:
@@ -85,6 +87,26 @@ def _buffer_key(source: str) -> str:
     return "mic" if source == "microphone" else "sys"
 
 
+def _deduplicate_overlaps(segments: list[TranscriptionSegment]) -> list[TranscriptionSegment]:
+    """Remove overlapping segments from same speaker — keep highest confidence."""
+    if not segments:
+        return []
+    # Sort by start time, then by confidence descending
+    sorted_segs = sorted(segments, key=lambda s: (s.start, -s.confidence))
+    result: list[TranscriptionSegment] = [sorted_segs[0]]
+    for seg in sorted_segs[1:]:
+        prev = result[-1]
+        overlap = prev.start < seg.end and seg.start < prev.end
+        if overlap and prev.speaker == seg.speaker:
+            # Keep the one with higher confidence
+            if seg.confidence > prev.confidence:
+                result[-1] = seg
+            # else: skip this segment
+        else:
+            result.append(seg)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # engine
 # ---------------------------------------------------------------------------
@@ -132,6 +154,7 @@ class TranscriptionEngine:
         self._executor: ThreadPoolExecutor | None = None
         self._on_segment: SegmentCallback | None = None
         self._final_segments: list[TranscriptionSegment] = []
+        self._source_segment_counts: dict[str, int] = {"mic": 0, "sys": 0}
 
     # ----------------------------------------------------------------
     # public API
@@ -169,7 +192,7 @@ class TranscriptionEngine:
             self._executor.shutdown(wait=True)
             self._executor = None
         # Flush whatever audio remains in the buffers.
-        self._final_segments = self._flush()
+        self._final_segments = _deduplicate_overlaps(self._flush())
         return self._final_segments
 
     # ----------------------------------------------------------------
@@ -202,7 +225,9 @@ class TranscriptionEngine:
             except Exception:
                 log.exception("Worker failed processing audio chunk")
 
-        log.info("Transcription worker stopped")
+        log.info("Transcription worker stopped — mic=%d, sys=%d segments",
+                 self._source_segment_counts["mic"],
+                 self._source_segment_counts["sys"])
 
     # ----------------------------------------------------------------
     # drain helpers — never call model.transcribe() here
@@ -259,7 +284,12 @@ class TranscriptionEngine:
         )
         results: list[TranscriptionSegment] = []
         for seg in raw_segments:
-            results.append(self._make_segment(seg, base_timestamp, key))
+            if seg.avg_logprob < CONFIDENCE_THRESHOLD:
+                continue
+            s = self._make_segment(seg, base_timestamp, key)
+            if len(s.text.split()) < MIN_WORDS:
+                continue
+            results.append(s)
         return results
 
     def _on_transcription_done(self, future, key: str) -> None:
@@ -305,7 +335,12 @@ class TranscriptionEngine:
                 compression_ratio_threshold=2.4,
             )
             for seg in raw_segments:
-                segments.append(self._make_segment(seg, base_timestamp, key))
+                if seg.avg_logprob < CONFIDENCE_THRESHOLD:
+                    continue
+                s = self._make_segment(seg, base_timestamp, key)
+                if len(s.text.split()) < MIN_WORDS:
+                    continue
+                segments.append(s)
         return segments
 
     @staticmethod
@@ -354,6 +389,8 @@ class TranscriptionEngine:
     # ----------------------------------------------------------------
 
     def _emit(self, segment: TranscriptionSegment) -> None:
+        key = "mic" if segment.speaker == "Me" else "sys"
+        self._source_segment_counts[key] += 1
         if self._on_segment is not None:
             self._on_segment(segment)
 
