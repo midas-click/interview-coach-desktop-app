@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     )
 
     # ---------- aws ----------
-    aws_region: str = "us-east-1"
+    aws_region: str = "us-east-2"
     aws_bucket: str = ""
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""

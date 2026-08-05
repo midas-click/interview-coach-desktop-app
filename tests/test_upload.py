@@ -16,7 +16,7 @@ from src.upload.s3_uploader import S3Uploader, UploadError
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return Settings(
-        aws_region="us-east-1",
+        aws_region="us-east-2",
         aws_bucket="test-bucket",
         aws_access_key_id="test-key",
         aws_secret_access_key="test-secret",
