@@ -1,7 +1,7 @@
 """Main application window.
 
-Assembles the dashboard, controls, and transcript view into a single
-window.  Wires MeetingController callbacks to UI updates.
+Assembles the dashboard and controls into a single window.
+Wires MeetingController callbacks to UI updates.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QFileDialog,
-    QLabel,
     QMainWindow,
     QMenu,
     QSystemTrayIcon,
@@ -27,7 +26,6 @@ from PySide6.QtWidgets import (
 from src.logger.logger import get_logger
 from src.ui.controls import ControlBar
 from src.ui.dashboard import Dashboard
-from src.ui.transcript_view import TranscriptView
 
 log = get_logger(__name__)
 
@@ -54,7 +52,7 @@ class MainWindow(QMainWindow):
         self._uploader = uploader
 
         self.setWindowTitle("Notepadder")
-        self.setMinimumSize(600, 420)
+        self.setMinimumSize(360, 300)
         self._load_icon()
 
         # -- central widget -------------------------------------------------
@@ -72,10 +70,6 @@ class MainWindow(QMainWindow):
         self._controls = ControlBar()
         layout.addWidget(self._controls)
 
-        # transcript (takes remaining space)
-        self._transcript = TranscriptView()
-        layout.addWidget(self._transcript, stretch=1)
-
         # -- wire signals ---------------------------------------------------
         self._controls.start_requested.connect(
             lambda: asyncio.ensure_future(self._on_start())
@@ -90,15 +84,9 @@ class MainWindow(QMainWindow):
             lambda: asyncio.ensure_future(self._on_upload())
         )
 
-        # status bar — permanent right-aligned label
-        self.statusBar().setStyleSheet("QStatusBar { margin: 2px 8px 2px 0px; }")
-        self._status_lbl = QLabel("Idle")
-        self._status_lbl.setStyleSheet("color: #888; font-size: 12px;")
-        self.statusBar().addPermanentWidget(self._status_lbl)
-
         # controller callbacks → UI
         self._controller.on_status_change = self._set_status
-        self._controller.on_chunks_persisted = self._on_chunks_persisted
+        self._controller.audio.on_speaking_change = self._on_speaking_change
 
         # elapsed timer
         self._elapsed_timer = QTimer(self)
@@ -110,7 +98,7 @@ class MainWindow(QMainWindow):
         self._restore_device_state()
 
         # initial state
-        self._set_status("Idle")
+        self._set_status("Ready")
         self._controls.set_state(ControlBar.State.IDLE)
 
         # tray icon
@@ -125,8 +113,6 @@ class MainWindow(QMainWindow):
         self._tray.setToolTip("Notepadder")
 
     def _load_icon(self) -> None:
-        """Load app icon.  Looks next to the exe in frozen mode, or in
-        the project root during development."""
         if getattr(sys, "frozen", False):
             base = Path(sys.executable).parent
             internal = base / "_internal"
@@ -172,13 +158,21 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _set_status(self, text: str) -> None:
-        self._status_lbl.setText(text)
+        self._dashboard.set_status(text)
+
+    def _on_speaking_change(self, speaker: str | None) -> None:
+        """Called from capture thread when the active speaker changes."""
+        if speaker == "interviewer":
+            self._set_status("Interviewer speaking…")
+        elif speaker == "candidate":
+            self._set_status("Candidate speaking…")
+        else:
+            self._set_status("Actively listening…")
+        log.debug("Speaking change: %s", speaker)
 
     async def _on_start(self) -> None:
-        self._transcript.clear()
-        self._controls.set_word_count(0)
-        self._controls.set_upload_enabled(False)
         self._controls.set_download_enabled(False)
+        self._controls.set_upload_enabled(False)
         self._save_device_state()
         try:
             log.info("Start button clicked")
@@ -188,11 +182,11 @@ class MainWindow(QMainWindow):
             mic_dev = self._dashboard.selected_mic_device
             sys_dev = self._dashboard.selected_sys_device
 
-            await self._controller.create_meeting(company, stage)
-            log.info("Meeting created: %s", self._controller.meeting_id)
+            await self._controller.create_interview(company, stage)
+            log.info("Interview created: %s", self._controller.interview_id)
             await self._controller.start(mic_device=mic_dev, sys_device=sys_dev)
 
-            self._dashboard.set_meeting_id(self._controller.meeting_id or "")
+            self._dashboard.set_interview_id(self._controller.interview_id or "")
             self._dashboard.set_company_info(company, stage)
             self._start_elapsed()
             self._controls.set_state(ControlBar.State.ACTIVE)
@@ -211,15 +205,15 @@ class MainWindow(QMainWindow):
             log.exception("Finish failed")
 
         self._controls.set_state(ControlBar.State.IDLE)
-        self._controls.set_upload_enabled(True)
         self._controls.set_download_enabled(True)
+        self._controls.set_upload_enabled(True)
         self._dashboard.reset_inputs()
 
     async def _on_download(self) -> None:
         try:
             self._set_status("Downloading JSON…")
             export = await self._controller.export_current()
-            mid = self._controller.meeting_id or "transcript"
+            mid = self._controller.interview_id or "transcript"
             path, _ = QFileDialog.getSaveFileName(
                 self, "Save Transcript", f"{mid}.json",
                 "JSON Files (*.json)",
@@ -235,24 +229,20 @@ class MainWindow(QMainWindow):
         try:
             self._set_status("Uploading…")
             export = await self._controller.export_current()
-            await self._uploader.upload(export, self._controller.meeting_id or "unknown")
+            await self._uploader.upload(export, self._controller.interview_id or "unknown")
             self._set_status("Upload complete")
         except Exception as exc:
             log.exception("Upload failed")
             self._set_status(f"Upload failed: {exc}")
 
-    def _on_chunks_persisted(self, chunks) -> None:
-        self._transcript.append_chunks(chunks)
-        self._controls.set_word_count(self._transcript.word_count)
-
     def _start_elapsed(self) -> None:
         self._elapsed_seconds = 0
-        self._controls.set_elapsed(0)
+        self._dashboard.set_elapsed(0)
         self._elapsed_timer.start()
 
     def _tick_elapsed(self) -> None:
         self._elapsed_seconds += 1
-        self._controls.set_elapsed(self._elapsed_seconds)
+        self._dashboard.set_elapsed(self._elapsed_seconds)
 
     # -- device state persistence --------------------------------------
 

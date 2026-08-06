@@ -1,99 +1,15 @@
-"""Tests for transcription engine and segment builder."""
+"""Tests for transcription engine and worker."""
 
 from __future__ import annotations
 
+import asyncio
+import threading
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import pytest
 
 from src.transcription.engine import TranscriptionEngine, TranscriptionSegment
-from src.transcription.segment_builder import SegmentBuilder, _split_sentences, _words
-
-
-# ---------------------------------------------------------------------------
-# _words
-# ---------------------------------------------------------------------------
-
-def test_words_strips_punctuation() -> None:
-    assert _words("Hello, world!") == ["hello", "world"]
-    assert _words("I have ten years of experience.") == ["i", "have", "ten", "years", "of", "experience"]
-
-
-# ---------------------------------------------------------------------------
-# _split_sentences
-# ---------------------------------------------------------------------------
-
-def test_split_sentences_single() -> None:
-    assert _split_sentences("Hello world") == ["Hello world"]
-
-
-def test_split_sentences_multiple() -> None:
-    result = _split_sentences("Hello. World! How are you?")
-    assert len(result) == 3
-    assert result[0].startswith("Hello.")
-
-
-def test_split_sentences_no_trailing_space() -> None:
-    """Period at end-of-string without following whitespace is not a split."""
-    assert _split_sentences("Done.") == ["Done."]
-
-
-# ---------------------------------------------------------------------------
-# SegmentBuilder
-# ---------------------------------------------------------------------------
-
-def test_segment_builder_merges_partials() -> None:
-    sb = SegmentBuilder()
-    assert sb.feed(TranscriptionSegment("Hello", 0.0, 1.0, 0.9)) == []
-    assert sb.feed(TranscriptionSegment(" world.", 1.0, 2.0, 0.85)) == []
-    chunks = sb.flush()
-    assert len(chunks) == 1
-    assert chunks[0].text == "Hello  world."  # whisper artifacts preserved
-
-
-def test_segment_builder_dedup() -> None:
-    sb = SegmentBuilder()
-    sb.feed(TranscriptionSegment("I like pizza very much.", 0.0, 2.0, 0.9))
-    # mostly overlapping text should be dropped
-    assert sb.feed(TranscriptionSegment("pizza very much", 1.0, 2.5, 0.9)) == []
-    chunks = sb.flush()
-    assert len(chunks) == 1
-    assert "pizza" in chunks[0].text
-
-
-def test_segment_builder_sentence_boundary_emits() -> None:
-    sb = SegmentBuilder()
-    sb.feed(TranscriptionSegment("First sentence.", 0.0, 2.0, 0.9))
-    chunks = sb.feed(TranscriptionSegment("Second sentence.", 2.0, 4.0, 0.9))
-    assert len(chunks) == 1
-    assert chunks[0].text == "First sentence."
-
-
-def test_segment_builder_flush_empty() -> None:
-    sb = SegmentBuilder()
-    assert sb.flush() == []
-
-
-def test_segment_builder_respects_timestamps() -> None:
-    sb = SegmentBuilder()
-    sb.feed(TranscriptionSegment("Hello.", 1.0, 2.0, 0.9))
-    # gap > 0.5s → pending is finalised at its own boundaries
-    chunks = sb.feed(TranscriptionSegment("World.", 3.0, 4.0, 0.9))
-    assert len(chunks) == 1
-    assert chunks[0].start_time == 1.0
-    assert chunks[0].end_time == 2.0  # not extended across gap
-
-
-def test_segment_builder_contiguous_extends_timestamps() -> None:
-    sb = SegmentBuilder()
-    sb.feed(TranscriptionSegment("Partial", 1.0, 2.0, 0.9))
-    chunks = sb.feed(TranscriptionSegment(" sentence.", 2.0, 3.0, 0.9))
-    # flush to get the merged result
-    chunks = sb.flush()
-    assert len(chunks) == 1
-    assert chunks[0].start_time == 1.0
-    assert chunks[0].end_time == 3.0  # extended across contiguous segment
 
 
 # ---------------------------------------------------------------------------
@@ -114,39 +30,111 @@ def mock_whisper() -> MagicMock:
         yield mock
 
 
-def test_engine_start_stop(mock_whisper: MagicMock) -> None:
-    engine = TranscriptionEngine(model_name="base")
-    from queue import Queue
-    from src.audio.capture import AudioChunk
-
-    q: Queue[AudioChunk] = Queue()
-    received: list[TranscriptionSegment] = []
-
-    engine.start(q, on_segment=received.append)
-    assert engine._running
-
-    engine.stop()
-    assert not engine._running
-
-
-def test_engine_flushes_remaining_on_stop(mock_whisper: MagicMock) -> None:
-    engine = TranscriptionEngine(model_name="base")
-    from queue import Queue
-    from src.audio.capture import AudioChunk
-
-    q: Queue[AudioChunk] = Queue()
+def test_engine_transcribe_wav(mock_whisper: MagicMock) -> None:
     mock_whisper.return_value.transcribe.return_value = (
-        [FakeSegment("Final words.", 0.0, 1.0, -0.5)],
+        [FakeSegment("Hello world.", 0.0, 1.0, -0.3)],
+        None,
+    )
+    engine = TranscriptionEngine(model_name="base")
+    segments = engine.transcribe("test.wav")
+    assert len(segments) == 1
+    assert segments[0].text == "Hello world."
+    assert segments[0].confidence == -0.3
+
+
+def test_engine_filters_low_confidence(mock_whisper: MagicMock) -> None:
+    mock_whisper.return_value.transcribe.return_value = (
+        [FakeSegment("noise", 0.0, 1.0, -1.5)],
+        None,
+    )
+    engine = TranscriptionEngine(model_name="base")
+    segments = engine.transcribe("test.wav")
+    assert len(segments) == 0
+
+
+def test_engine_filters_short_text(mock_whisper: MagicMock) -> None:
+    mock_whisper.return_value.transcribe.return_value = (
+        [FakeSegment("Hi.", 0.0, 1.0, -0.3)],
+        None,
+    )
+    engine = TranscriptionEngine(model_name="base")
+    segments = engine.transcribe("test.wav")
+    assert len(segments) == 0
+
+
+# ---------------------------------------------------------------------------
+# TranscriptionWorker (integration test with real DB)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def worker_db(tmp_path: Path):
+    from src.storage.repository import Repository
+    db_path = tmp_path / "test.db"
+    repo = Repository(db_path)
+
+    async def _init():
+        await repo.init()
+    asyncio.run(_init())
+    return repo
+
+
+def test_worker_processes_utterance(worker_db, tmp_path: Path, mock_whisper: MagicMock) -> None:
+    from src.transcription.worker import TranscriptionWorker
+    import wave
+    import numpy as np
+
+    mock_whisper.return_value.transcribe.return_value = (
+        [FakeSegment("Tell me about yourself.", 0.0, 2.0, -0.2)],
         None,
     )
 
-    # feed one chunk and immediately stop
-    data = np.zeros(8000, dtype=np.float32)
-    q.put(AudioChunk(source="test", data=data, sample_rate=16000, timestamp=0.0))
-    engine.start(q, on_segment=lambda s: None)
-    import time
-    time.sleep(0.3)  # let worker pick up the chunk
+    # Create a test WAV
+    wav_path = tmp_path / "test.wav"
+    audio = np.zeros(16000, dtype=np.int16)
+    audio[8000:12000] = 1000  # some fake signal
+    with wave.open(str(wav_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(audio.tobytes())
 
-    segments = engine.stop()
-    assert len(segments) == 1
-    assert segments[0].text == "Final words."
+    # Insert interview + utterance
+    async def _setup():
+        await worker_db.create_interview("test-1")
+        conn = __import__("sqlite3").connect(worker_db.db_path)
+        conn.execute(
+            "INSERT INTO utterances (interview_id, speaker, start_ms, end_ms, audio_path, status) "
+            "VALUES ('test-1', 'interviewer', 0, 2000, ?, 'queued')",
+            (str(wav_path),),
+        )
+        conn.commit()
+        conn.close()
+
+    asyncio.run(_setup())
+
+    engine = TranscriptionEngine(model_name="base")
+    worker = TranscriptionWorker(worker_db, engine)
+
+    worker.start()
+
+    # Wait for processing
+    import time
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        utterance = asyncio.run(worker_db.next_queued())
+        if utterance is None:
+            # No more queued — check if completed
+            break
+        time.sleep(0.3)
+
+    worker.stop()
+
+    # Verify utterance was processed
+    async def _verify():
+        utterances = await worker_db.get_utterances("test-1")
+        assert len(utterances) == 1
+        assert utterances[0].transcript == "Tell me about yourself."
+        assert utterances[0].confidence == -0.2
+        assert not wav_path.exists()  # WAV was deleted
+
+    asyncio.run(_verify())

@@ -27,13 +27,22 @@ class Settings(BaseSettings):
 
     # ---------- transcription ----------
     whisper_model: str = "base"
-    whisper_device: str = "auto"       # "auto" detects CUDA, "cpu" forces CPU
-    whisper_compute_type: str = "int8"  # "float16" on GPU, "int8" for CPU
+    whisper_device: str = "auto"
+    whisper_compute_type: str = "int8"
+
+    # ---------- vad ----------
+    vad_threshold: float = 0.5
+    vad_silence_ms: int = 800
+    vad_min_speech_ms: int = 500
 
     # ---------- output ----------
     output_dir: Path = Field(
         default=Path("./output"),
         description="Directory for local transcript exports",
+    )
+    temp_dir: Path = Field(
+        default=Path("./data/temp"),
+        description="Directory for temporary WAV files during transcription",
     )
 
     # ---------- aws ----------

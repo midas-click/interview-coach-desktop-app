@@ -1,4 +1,4 @@
-"""Status dashboard showing meeting info, device selection, and status."""
+"""Status dashboard showing interview metadata, device selection, and live status."""
 
 from __future__ import annotations
 
@@ -6,74 +6,81 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
-    QGridLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
+    QVBoxLayout,
     QWidget,
 )
 
 from src.audio.capture import list_microphones, list_loopback_devices
 
+_FIELD_WIDTH = 240
 
-def _label(text: str) -> QLabel:
-    lbl = QLabel(text)
+
+def _row(label_text: str, widget: QWidget) -> QHBoxLayout:
+    lbl = QLabel(label_text)
     lbl.setTextFormat(Qt.TextFormat.PlainText)
-    return lbl
-
-
-def _value_label() -> QLabel:
-    lbl = QLabel("—")
-    lbl.setTextFormat(Qt.TextFormat.PlainText)
-    lbl.setStyleSheet("font-weight: bold;")
-    return lbl
+    lbl.setFixedWidth(100)
+    row = QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
+    row.addWidget(lbl)
+    row.addWidget(widget)
+    row.addStretch()
+    return row
 
 
 class Dashboard(QFrame):
-    """Top-of-window panel with meeting metadata and live status."""
+    """Top-of-window panel with interview metadata, device selection, and status."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.StyledPanel)
 
-        grid = QGridLayout(self)
-        grid.setContentsMargins(8, 8, 8, 8)
-        grid.setHorizontalSpacing(16)
-        grid.setVerticalSpacing(4)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
 
-        # row 0 — meeting ID
-        grid.addWidget(_label("Meeting:"), 0, 0)
-        self.meeting_id_lbl = _value_label()
-        grid.addWidget(self.meeting_id_lbl, 0, 1)
+        # -- meeting ID -----------------------------------------------------
+        self.meeting_id_lbl = QLabel("—")
+        self.meeting_id_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addLayout(_row("Meeting:", self.meeting_id_lbl))
 
-        # row 1 — company / stage inputs
-        grid.addWidget(_label("Company:"), 1, 0)
+        # -- company --------------------------------------------------------
         self.company_name = QLineEdit()
         self.company_name.setPlaceholderText("e.g. Google")
-        self.company_name.setMaximumWidth(200)
-        grid.addWidget(self.company_name, 1, 1)
+        self.company_name.setFixedWidth(_FIELD_WIDTH)
+        layout.addLayout(_row("Company:", self.company_name))
 
-        grid.addWidget(_label("Stage:"), 1, 2)
+        # -- stage ----------------------------------------------------------
         self.interview_stage = QLineEdit()
         self.interview_stage.setPlaceholderText("e.g. Coding Interview")
-        self.interview_stage.setMaximumWidth(200)
-        grid.addWidget(self.interview_stage, 1, 3)
+        self.interview_stage.setFixedWidth(_FIELD_WIDTH)
+        layout.addLayout(_row("Stage:", self.interview_stage))
 
-        # row 2 — mic / sys device selection
-        grid.addWidget(_label("Microphone:"), 2, 0)
+        # -- microphone -----------------------------------------------------
         self.mic_combo = QComboBox()
         self.mic_combo.addItem("(system default)", None)
         self._populate_mic_devices()
-        self.mic_combo.setMaximumWidth(200)
-        grid.addWidget(self.mic_combo, 2, 1)
+        self.mic_combo.setFixedWidth(_FIELD_WIDTH)
+        layout.addLayout(_row("Microphone:", self.mic_combo))
 
-        grid.addWidget(_label("System audio:"), 2, 2)
+        # -- system audio ---------------------------------------------------
         self.sys_combo = QComboBox()
         self.sys_combo.addItem("(none — mic only)", None)
         self._populate_sys_devices()
-        self.sys_combo.setMaximumWidth(200)
-        grid.addWidget(self.sys_combo, 2, 3)
+        self.sys_combo.setFixedWidth(_FIELD_WIDTH)
+        layout.addLayout(_row("System audio:", self.sys_combo))
 
-        # row 3 — (removed: status now in control bar)
+        # -- status ---------------------------------------------------------
+        self.status_lbl = QLabel("Ready")
+        self.status_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addLayout(_row("Status:", self.status_lbl))
+
+        # -- elapsed --------------------------------------------------------
+        self.elapsed_lbl = QLabel("00:00")
+        self.elapsed_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addLayout(_row("Elapsed:", self.elapsed_lbl))
 
     # -- public ----------------------------------------------------------
 
@@ -85,8 +92,19 @@ class Dashboard(QFrame):
     def selected_sys_device(self) -> int | None:
         return self.sys_combo.currentData()
 
-    def set_meeting_id(self, mid: str) -> None:
+    def set_interview_id(self, mid: str) -> None:
         self.meeting_id_lbl.setText(mid)
+
+    def set_status(self, text: str) -> None:
+        self.status_lbl.setText(text)
+
+    def set_elapsed(self, seconds: int) -> None:
+        m, s = divmod(seconds, 60)
+        h, m = divmod(m, 60)
+        if h:
+            self.elapsed_lbl.setText(f"{h}:{m:02d}:{s:02d}")
+        else:
+            self.elapsed_lbl.setText(f"{m:02d}:{s:02d}")
 
     def set_company_info(self, company: str | None, stage: str | None) -> None:
         self.company_name.setReadOnly(True)
@@ -95,7 +113,6 @@ class Dashboard(QFrame):
         self.sys_combo.setEnabled(False)
 
     def reset_inputs(self) -> None:
-        """Re-enable inputs for a new meeting."""
         self.company_name.setReadOnly(False)
         self.interview_stage.setReadOnly(False)
         self.company_name.clear()
@@ -103,6 +120,8 @@ class Dashboard(QFrame):
         self.mic_combo.setEnabled(True)
         self.sys_combo.setEnabled(True)
         self.meeting_id_lbl.setText("—")
+        self.status_lbl.setText("Ready")
+        self.elapsed_lbl.setText("00:00")
 
     # -- device population ----------------------------------------------
 

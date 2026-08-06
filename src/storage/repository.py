@@ -1,4 +1,4 @@
-"""Async SQLite repository for meetings and transcript chunks."""
+"""Async SQLite repository for interviews and utterances."""
 
 from __future__ import annotations
 
@@ -7,44 +7,52 @@ from pathlib import Path
 
 import aiosqlite
 
-from src.storage.models import Meeting, MeetingStatus, TranscriptChunk
+from src.logger.logger import get_logger
+from src.storage.models import Interview, InterviewStatus, Utterance, UtteranceStatus
+
+log = get_logger(__name__)
 
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS meetings (
-    meeting_id      TEXT PRIMARY KEY,
-    company_name    TEXT,
-    interview_stage TEXT,
-    created_at      TEXT NOT NULL,
-    started_at      TEXT,
-    ended_at        TEXT,
-    status          TEXT NOT NULL DEFAULT 'pending'
-                    CHECK (status IN ('pending','active','finished'))
+CREATE TABLE IF NOT EXISTS interviews (
+    id          TEXT PRIMARY KEY,
+    company     TEXT,
+    stage       TEXT,
+    created_at  TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending','active','completed'))
 );
 
-CREATE TABLE IF NOT EXISTS transcript_chunks (
+CREATE TABLE IF NOT EXISTS utterances (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    meeting_id    TEXT NOT NULL REFERENCES meetings(meeting_id),
-    speaker       TEXT NOT NULL DEFAULT 'Unknown',
-    start_time    REAL NOT NULL,
-    end_time      REAL NOT NULL,
-    confidence    REAL NOT NULL DEFAULT 0.0,
-    text          TEXT NOT NULL,
+    interview_id  TEXT NOT NULL REFERENCES interviews(id),
+    speaker       TEXT NOT NULL CHECK (speaker IN ('interviewer','candidate')),
+    start_ms      INTEGER NOT NULL,
+    end_ms        INTEGER NOT NULL,
+    audio_path    TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'queued'
+                  CHECK (status IN ('queued','processing','completed','failed')),
+    confidence    REAL,
+    transcript    TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_chunks_meeting ON transcript_chunks(meeting_id);
-CREATE INDEX IF NOT EXISTS idx_chunks_time ON transcript_chunks(meeting_id, start_time);
+CREATE INDEX IF NOT EXISTS idx_utterances_interview ON utterances(interview_id);
+CREATE INDEX IF NOT EXISTS idx_utterances_status ON utterances(status, id);
 """
 
 
 class Repository:
-    """Async data access for meetings and transcript chunks.
+    """Async data access for interviews and utterances.
 
-    Uses WAL mode for non-blocking reads during active transcription.
+    Uses WAL mode for concurrent reads/writes across threads.
     """
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = str(db_path)
+
+    @property
+    def db_path(self) -> str:
+        return self._db_path
 
     # ------------------------------------------------------------------
     # initialisation
@@ -59,139 +67,182 @@ class Repository:
             await db.executescript(_SCHEMA)
             await db.commit()
 
+        # Verify tables exist
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            )
+            tables = [row[0] async for row in cursor]
+            log.info("Database initialised at %s — tables: %s", self._db_path, tables)
+
     # ------------------------------------------------------------------
-    # meeting lifecycle
+    # interview lifecycle
     # ------------------------------------------------------------------
 
-    async def create_meeting(
+    async def create_interview(
         self,
-        meeting_id: str,
-        company_name: str | None = None,
-        interview_stage: str | None = None,
-    ) -> Meeting:
-        meeting = Meeting(
-            meeting_id=meeting_id,
-            company_name=company_name,
-            interview_stage=interview_stage,
+        interview_id: str,
+        company: str | None = None,
+        stage: str | None = None,
+    ) -> Interview:
+        interview = Interview(
+            id=interview_id,
+            company=company,
+            stage=stage,
             created_at=datetime.now(tz=timezone.utc),
         )
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(
-                "INSERT INTO meetings (meeting_id, company_name, interview_stage, created_at, status) "
+                "INSERT INTO interviews (id, company, stage, created_at, status) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (meeting.meeting_id, meeting.company_name, meeting.interview_stage,
-                 meeting.created_at.isoformat(), meeting.status.value),
+                (interview.id, interview.company, interview.stage,
+                 interview.created_at.isoformat(), interview.status.value),
             )
             await db.commit()
-        return meeting
+        log.info("Interview created: %s (company=%s, stage=%s)", interview_id, company, stage)
+        return interview
 
-    async def _update_status(self, meeting_id: str, status: MeetingStatus) -> None:
-        now = datetime.now(tz=timezone.utc).isoformat()
-        extra_sql = ""
-        params: list = [status.value, meeting_id]
-
-        if status == MeetingStatus.ACTIVE:
-            extra_sql = ", started_at = COALESCE(started_at, ?)"
-            params.insert(1, now)
-        elif status == MeetingStatus.FINISHED:
-            extra_sql = ", ended_at = COALESCE(ended_at, ?)"
-            params.insert(1, now)
-
+    async def start_interview(self, interview_id: str) -> None:
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(
-                f"UPDATE meetings SET status = ?{extra_sql} WHERE meeting_id = ?",
-                params,
+                "UPDATE interviews SET status = ? WHERE id = ?",
+                (InterviewStatus.ACTIVE.value, interview_id),
             )
             await db.commit()
+        log.info("Interview started: %s", interview_id)
 
-    async def start_meeting(self, meeting_id: str) -> None:
-        await self._update_status(meeting_id, MeetingStatus.ACTIVE)
+    async def finish_interview(self, interview_id: str) -> None:
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "UPDATE interviews SET status = ? WHERE id = ?",
+                (InterviewStatus.COMPLETED.value, interview_id),
+            )
+            await db.commit()
+        log.info("Interview finished: %s", interview_id)
 
-    async def finish_meeting(self, meeting_id: str) -> None:
-        await self._update_status(meeting_id, MeetingStatus.FINISHED)
+    # ------------------------------------------------------------------
+    # utterances
+    # ------------------------------------------------------------------
 
-    async def get_meeting(self, meeting_id: str) -> Meeting | None:
+    async def next_queued(self) -> Utterance | None:
+        """Return the first queued utterance, or None."""
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT * FROM meetings WHERE meeting_id = ?", (meeting_id,)
+                "SELECT * FROM utterances WHERE status = 'queued' ORDER BY id LIMIT 1"
             )
             row = await cursor.fetchone()
-            return self._row_to_meeting(row) if row else None
+            return self._row_to_utterance(row) if row else None
 
-    # ------------------------------------------------------------------
-    # transcript chunks
-    # ------------------------------------------------------------------
-
-    async def insert_chunks(self, chunks: list[TranscriptChunk]) -> None:
-        """Batch-insert transcript chunks."""
+    async def count_pending(self, interview_id: str) -> int:
+        """Count utterances still queued or processing for an interview."""
         async with aiosqlite.connect(self._db_path) as db:
-            await db.executemany(
-                "INSERT INTO transcript_chunks (meeting_id, speaker, start_time, end_time, "
-                "confidence, text) VALUES (?, ?, ?, ?, ?, ?)",
-                [(c.meeting_id, c.speaker, c.start_time, c.end_time, c.confidence, c.text)
-                 for c in chunks],
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM utterances WHERE interview_id = ? "
+                "AND status IN ('queued','processing')",
+                (interview_id,),
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+    async def mark_processing(self, utterance_id: int) -> None:
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "UPDATE utterances SET status = ? WHERE id = ?",
+                (UtteranceStatus.PROCESSING.value, utterance_id),
             )
             await db.commit()
+        log.debug("Utterance %d → processing", utterance_id)
 
-    async def get_chunks(self, meeting_id: str) -> list[TranscriptChunk]:
-        """Return all chunks for a meeting, ordered by start_time."""
+    async def mark_completed(self, utterance_id: int, transcript: str, confidence: float) -> None:
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "UPDATE utterances SET status = ?, transcript = ?, confidence = ? WHERE id = ?",
+                (UtteranceStatus.COMPLETED.value, transcript, confidence, utterance_id),
+            )
+            await db.commit()
+        log.info("Utterance %d → completed (confidence=%.3f, text=%s)",
+                 utterance_id, confidence, transcript[:80])
+
+    async def mark_failed(self, utterance_id: int) -> None:
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "UPDATE utterances SET status = ? WHERE id = ?",
+                (UtteranceStatus.FAILED.value, utterance_id),
+            )
+            await db.commit()
+        log.warning("Utterance %d → failed", utterance_id)
+
+    async def get_utterances(self, interview_id: str) -> list[Utterance]:
+        """Return completed utterances for an interview, ordered by start_ms."""
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT * FROM transcript_chunks WHERE meeting_id = ? ORDER BY start_time",
-                (meeting_id,),
+                "SELECT * FROM utterances WHERE interview_id = ? AND status = 'completed' "
+                "ORDER BY start_ms",
+                (interview_id,),
             )
             rows = await cursor.fetchall()
-            return [self._row_to_chunk(r) for r in rows]
+            return [self._row_to_utterance(r) for r in rows]
 
-    async def export_transcript(self, meeting_id: str) -> dict:
-        """Return the full transcript payload matching the spec JSON format."""
-        meeting = await self.get_meeting(meeting_id)
-        chunks = await self.get_chunks(meeting_id)
+    # ------------------------------------------------------------------
+    # export
+    # ------------------------------------------------------------------
+
+    async def export_json(
+        self,
+        interview_id: str,
+        model: str,
+        language: str = "en",
+    ) -> dict:
+        """Return the final JSON payload matching the spec schema."""
+        interview = await self._get_interview(interview_id)
+        utterances = await self.get_utterances(interview_id)
+        log.info("Exporting JSON for %s: %d utterances", interview_id, len(utterances))
 
         return {
-            "meetingId": meeting_id,
-            "companyName": meeting.company_name if meeting else None,
-            "interviewStage": meeting.interview_stage if meeting else None,
-            "createdAt": meeting.created_at.isoformat() if meeting else None,
-            "language": "en",
-            "transcript": [
+            "schemaVersion": 1,
+            "interviewId": interview_id,
+            "company": interview.company if interview else None,
+            "stage": interview.stage if interview else None,
+            "transcriber": {
+                "model": model,
+                "language": language,
+                "createdAt": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            },
+            "utterances": [
                 {
-                    "speaker": c.speaker,
-                    "start": c.start_time,
-                    "end": c.end_time,
-                    "confidence": c.confidence,
-                    "text": c.text,
+                    "id": u.id,
+                    "speaker": u.speaker,
+                    "startMs": u.start_ms,
+                    "endMs": u.end_ms,
+                    "confidence": u.confidence,
+                    "text": u.transcript,
                 }
-                for c in chunks
+                for u in utterances
+                if u.transcript
             ],
         }
 
-    async def export_txt(self, meeting_id: str) -> str:
-        """Return the transcript as a plain-text document.
-
-        Format::
-
-            [00:00:01] Unknown: Tell me about yourself.
-            [00:00:05] Unknown: I have 10 years experience.
-        """
-        meeting = await self.get_meeting(meeting_id)
-        chunks = await self.get_chunks(meeting_id)
+    async def export_txt(self, interview_id: str) -> str:
+        """Return the transcript as a plain-text document."""
+        interview = await self._get_interview(interview_id)
+        utterances = await self.get_utterances(interview_id)
 
         lines: list[str] = []
-        if meeting:
-            lines.append(f"Meeting: {meeting_id}")
-            if meeting.company_name:
-                lines.append(f"Company: {meeting.company_name}")
-            if meeting.interview_stage:
-                lines.append(f"Stage: {meeting.interview_stage}")
-            lines.append(f"Date: {meeting.created_at.strftime('%Y-%m-%d %H:%M UTC')}")
+        if interview:
+            lines.append(f"Interview: {interview_id}")
+            if interview.company:
+                lines.append(f"Company: {interview.company}")
+            if interview.stage:
+                lines.append(f"Stage: {interview.stage}")
+            lines.append(f"Date: {interview.created_at.strftime('%Y-%m-%d %H:%M UTC')}")
             lines.append("")
 
-        for c in chunks:
-            ts = self._format_timestamp(c.start_time)
-            lines.append(f"[{ts}] {c.speaker}: {c.text}")
+        for u in utterances:
+            if u.transcript:
+                ts = self._format_timestamp(u.start_ms / 1000)
+                lines.append(f"[{ts}] {u.speaker}: {u.transcript}")
 
         return "\n".join(lines)
 
@@ -206,33 +257,39 @@ class Repository:
     # helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _row_to_meeting(row: aiosqlite.Row) -> Meeting:
-        def _dt(val: str | None) -> datetime | None:
-            return datetime.fromisoformat(val) if val else None
+    async def _get_interview(self, interview_id: str) -> Interview | None:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM interviews WHERE id = ?", (interview_id,)
+            )
+            row = await cursor.fetchone()
+            return self._row_to_interview(row) if row else None
 
-        return Meeting(
-            meeting_id=row["meeting_id"],
-            company_name=row["company_name"],
-            interview_stage=row["interview_stage"],
+    @staticmethod
+    def _row_to_interview(row: aiosqlite.Row) -> Interview:
+        return Interview(
+            id=row["id"],
+            company=row["company"],
+            stage=row["stage"],
             created_at=datetime.fromisoformat(row["created_at"]),
-            started_at=_dt(row["started_at"]),
-            ended_at=_dt(row["ended_at"]),
-            status=MeetingStatus(row["status"]),
+            status=InterviewStatus(row["status"]),
         )
 
     @staticmethod
-    def _row_to_chunk(row: aiosqlite.Row) -> TranscriptChunk:
+    def _row_to_utterance(row: aiosqlite.Row) -> Utterance:
         def _dt(val: str | None) -> datetime | None:
             return datetime.fromisoformat(val) if val else None
 
-        return TranscriptChunk(
+        return Utterance(
             id=row["id"],
-            meeting_id=row["meeting_id"],
+            interview_id=row["interview_id"],
             speaker=row["speaker"],
-            start_time=row["start_time"],
-            end_time=row["end_time"],
+            start_ms=row["start_ms"],
+            end_ms=row["end_ms"],
+            audio_path=row["audio_path"],
+            status=UtteranceStatus(row["status"]),
             confidence=row["confidence"],
-            text=row["text"],
+            transcript=row["transcript"],
             created_at=_dt(row["created_at"]),
         )

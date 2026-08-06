@@ -1,4 +1,4 @@
-"""Interview Transcriber — Windows desktop application for real-time transcription.
+"""Notepadder — Windows desktop application for interview transcription.
 
 Entry point. Initialises Qt application with asyncio event loop,
 loads configuration, and launches the main window.
@@ -37,10 +37,8 @@ def _write_crash(exc_type, exc_value, _tb) -> None:
 
 def _install_crash_handler() -> None:
     sys.excepthook = _write_crash
-    # Catch segfaults / illegal instructions from C extensions
     try:
         import signal
-        import ctypes
 
         def _on_signal(sig, _frame):
             sig_names = {
@@ -62,16 +60,13 @@ def _install_crash_handler() -> None:
         signal.signal(signal.SIGILL, _on_signal)
         signal.signal(signal.SIGFPE, _on_signal)
     except Exception:
-        pass  # signal handlers best-effort
+        pass
 
 
 _install_crash_handler()
 
-# ────────────────────────────────────────────────────────────────────────────
-
 
 def _app_dir() -> Path:
-    """Directory containing the app bundle (or source tree in dev)."""
     if getattr(sys, "frozen", False):
         base = Path(sys.executable).parent
         internal = base / "_internal"
@@ -83,7 +78,6 @@ DB_PATH = _app_dir() / "data" / "transcriber.db"
 
 
 def main() -> None:
-    # Windows taskbar icon — must be set before QApplication is shown.
     try:
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
@@ -98,16 +92,13 @@ def main() -> None:
     app.setApplicationVersion("0.1.0")
 
     # --- config & logging ------------------------------------------------
-    # In frozen mode, load .env from the exe's folder so users can edit
-    # settings without touching the _internal bundle.
     if getattr(sys, "frozen", False):
         root = Path(sys.executable).parent
         settings = Settings(_env_file=str(root / ".env"))
         settings.output_dir = root / "output"
         settings.log_file = root / "logs" / "notepadder.log"
+        settings.temp_dir = root / "data" / "temp"
         model_path = root / "models" / "whisper-base"
-        # Only override the default — if the user set a different model
-        # in .env, respect their choice.
         if model_path.exists() and settings.whisper_model == "base":
             settings.whisper_model = str(model_path)
     else:
@@ -133,7 +124,6 @@ def main() -> None:
 
     # --- UI --------------------------------------------------------------
     window = MainWindow(settings, controller, uploader)
-    # Set the app-level icon too so the taskbar picks it up.
     if not window.windowIcon().isNull():
         app.setWindowIcon(window.windowIcon())
     window.show()
@@ -144,8 +134,6 @@ def main() -> None:
     app.aboutToQuit.connect(loop.stop)
     loop.run_forever()
 
-    # Suppress known qasync shutdown error on Windows where Qt deletes
-    # signal sources before the event loop fully closes.
     try:
         loop.close()
     except RuntimeError:

@@ -22,7 +22,7 @@ class UploadError(Exception):
 
 
 MAX_RETRIES = 3
-BASE_DELAY = 1.0  # seconds
+BASE_DELAY = 1.0
 
 
 class S3Uploader:
@@ -47,19 +47,19 @@ class S3Uploader:
     # public API
     # ------------------------------------------------------------------
 
-    async def upload(self, export_data: dict, meeting_id: str) -> Path:
+    async def upload(self, export_data: dict, interview_id: str) -> Path:
         """Export JSON to local disk, then upload to S3.
 
         Returns the path to the local JSON file (kept even if upload fails).
         Raises ``UploadError`` only when S3 fails after all retries.
         """
-        local_path = self._save_local(export_data, meeting_id)
+        local_path = self._save_local(export_data, interview_id)
 
         try:
-            await self._upload_with_retry(local_path, meeting_id)
+            await self._upload_with_retry(local_path, interview_id)
         except Exception:
             raise UploadError(
-                f"Upload failed for meeting {meeting_id}. "
+                f"Upload failed for interview {interview_id}. "
                 f"Local copy kept at {local_path}"
             )
 
@@ -69,17 +69,15 @@ class S3Uploader:
     # internals
     # ------------------------------------------------------------------
 
-    def _save_local(self, data: dict, meeting_id: str) -> Path:
-        dir_path = self._output_dir / meeting_id
+    def _save_local(self, data: dict, interview_id: str) -> Path:
+        dir_path = self._output_dir / interview_id
         dir_path.mkdir(parents=True, exist_ok=True)
         file_path = dir_path / "transcript.json"
         file_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         return file_path
 
-
-
-    async def _upload_with_retry(self, file_path: Path, meeting_id: str) -> None:
-        s3_key = f"interviews/{meeting_id}/transcript.json"
+    async def _upload_with_retry(self, file_path: Path, interview_id: str) -> None:
+        s3_key = f"interviews/{interview_id}/transcript.json"
         last_exc: Exception | None = None
 
         for attempt in range(1, MAX_RETRIES + 1):

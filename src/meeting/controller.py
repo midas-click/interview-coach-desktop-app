@@ -1,26 +1,20 @@
-"""Meeting lifecycle orchestrator.
+"""Interview lifecycle orchestrator.
 
-Coordinates audio capture, transcription, segment merging, and
-periodic persistence to SQLite.  The controller itself is
-async-friendly but callbacks from worker threads are bridged
-via a simple lock.
+Coordinates audio capture, background transcription, and
+database persistence.  Does NOT perform transcription itself.
 """
 
 from __future__ import annotations
 
 import asyncio
-import threading
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from src.audio.manager import AudioManager
 from src.logger.logger import get_logger
-from src.storage.models import TranscriptChunk
-from src.transcription.engine import (
-    TranscriptionEngine,
-    TranscriptionSegment,
-)
-from src.transcription.segment_builder import SegmentBuilder
+from src.transcription.engine import TranscriptionEngine
+from src.transcription.worker import TranscriptionWorker
 
 log = get_logger(__name__)
 
@@ -30,191 +24,126 @@ if TYPE_CHECKING:
 
 
 class MeetingController:
-    """Manages one interview meeting at a time.
+    """Manages one interview at a time.
 
     Callbacks
     ---------
     ``on_status_change(status: str)``
-        Called from the asyncio event loop whenever the meeting
-        status transitions.
-    ``on_chunks_persisted(chunks: list[TranscriptChunk])``
-        Called after a batch of chunks has been written to the
-        database (useful for updating the live transcript UI).
+        Called from the asyncio event loop when the meeting status transitions.
     """
 
     def __init__(self, settings: Settings, repository: Repository) -> None:
         self._settings = settings
         self._repo = repository
 
-        self._audio = AudioManager()
         self._engine = TranscriptionEngine(
             model_name=settings.whisper_model,
             device=settings.whisper_device,
             compute_type=settings.whisper_compute_type,
         )
-        self._segment_builder = SegmentBuilder()
 
-        # current meeting state
-        self._meeting_id: str | None = None
+        self._audio = AudioManager(
+            db_path=self._repo.db_path,
+            temp_dir=settings.temp_dir,
+            vad_threshold=settings.vad_threshold,
+            vad_silence_ms=settings.vad_silence_ms,
+            vad_min_speech_ms=settings.vad_min_speech_ms,
+        )
 
-        # pending chunks waiting for periodic DB flush
-        self._lock = threading.Lock()
-        self._pending_chunks: list[TranscriptChunk] = []
+        self._worker = TranscriptionWorker(self._repo, self._engine)
 
-        # background flush task
-        self._flush_task: asyncio.Task[None] | None = None
-        self._flush_stop: asyncio.Event | None = None
+        self._interview_id: str | None = None
 
         # callbacks
         self.on_status_change: StatusCallback | None = None
-        self.on_chunks_persisted: ChunksCallback | None = None
 
     # ------------------------------------------------------------------
-    # public properties
+    # public
     # ------------------------------------------------------------------
 
     @property
-    def meeting_id(self) -> str | None:
-        return self._meeting_id
+    def interview_id(self) -> str | None:
+        return self._interview_id
 
-    # ------------------------------------------------------------------
-    # lifecycle
-    # ------------------------------------------------------------------
+    @property
+    def audio(self) -> AudioManager:
+        return self._audio
 
-    async def create_meeting(
+    async def create_interview(
         self,
-        company_name: str | None = None,
-        interview_stage: str | None = None,
+        company: str | None = None,
+        stage: str | None = None,
     ) -> str:
-        """Create a new meeting row and return its ID."""
-        meeting_id = uuid.uuid4().hex[:12]
-        await self._repo.create_meeting(meeting_id, company_name, interview_stage)
-        self._meeting_id = meeting_id
-        return meeting_id
+        """Create a new interview row and return its ID."""
+        interview_id = str(uuid.uuid4())
+        await self._repo.create_interview(interview_id, company, stage)
+        self._interview_id = interview_id
+        return interview_id
 
     async def start(
         self,
         mic_device: int | None = None,
         sys_device: int | None = None,
     ) -> None:
-        """Begin capturing audio and transcribing."""
-        if self._meeting_id is None:
-            raise RuntimeError("No meeting created — call create_meeting() first")
+        """Begin audio capture and background transcription."""
+        if self._interview_id is None:
+            raise RuntimeError("No interview created — call create_interview() first")
 
-        self._audio.start_microphone(mic_device)
-        if sys_device is not None:
-            try:
-                self._audio.start_system_audio(sys_device)
-            except Exception as exc:
-                log.warning("System audio device %d failed: %s", sys_device, exc)
-
-        log.info(
-            "Starting transcription — mic=%s, sys=%s",
-            "default" if mic_device is None else f"device {mic_device}",
-            "off" if sys_device is None else f"device {sys_device}",
-        )
-
-        self._engine.start(self._audio.audio_queue, self._on_transcription_segment)
-
-        self._flush_stop = asyncio.Event()
-        self._flush_task = asyncio.create_task(self._flush_loop())
-
-        await self._repo.start_meeting(self._meeting_id)
+        self._audio.start(self._interview_id, mic_device, sys_device)
+        self._worker.start()
+        await self._repo.start_interview(self._interview_id)
         self._notify_status("Actively listening…")
+        log.info("Interview started: %s", self._interview_id)
 
     async def finish(self) -> dict:
-        """Stop everything, finalise, export JSON + TXT, return JSON payload."""
-        log.info("Finishing meeting %s", self._meeting_id)
+        """Stop capture, drain transcription queue, finalise, return JSON export."""
+        log.info("Finishing interview %s", self._interview_id)
+
+        # 1. Stop audio capture — flushes final utterances as queued
+        self._notify_status("Stopping capture…")
         self._audio.stop_all()
-        remaining = self._engine.stop()
-        for seg in remaining:
-            self._on_transcription_segment(seg)
 
-        with self._lock:
-            chunks = self._segment_builder.flush()
-            for c in chunks:
-                c.meeting_id = self._meeting_id  # type: ignore[assignment]
-            self._pending_chunks.extend(chunks)
+        # 2. Wait for all utterances to be transcribed
+        self._notify_status("Transcribing remaining audio…")
+        while True:
+            pending = await self._repo.count_pending(self._interview_id)
+            if pending == 0:
+                log.info("All utterances transcribed — queue empty")
+                break
+            log.info("Waiting for transcription: %d utterance(s) remaining", pending)
+            await asyncio.sleep(0.5)
 
-        self._notify_status("Saving transcript…")
-        await self._persist_pending()
-        self._stop_flush_loop()
-        await self._repo.finish_meeting(self._meeting_id)  # type: ignore[arg-type]
+        # 3. Stop worker
+        self._worker.stop()
 
-        self._notify_status("Generating JSON…")
-        export = await self._repo.export_transcript(self._meeting_id)  # type: ignore[arg-type]
-        txt = await self._repo.export_txt(self._meeting_id)  # type: ignore[arg-type]
+        # 4. Finalise interview
+        await self._repo.finish_interview(self._interview_id)
+
+        # 5. Export
+        self._notify_status("Generating export…")
+        export = await self.export_current()
+        txt = await self._repo.export_txt(self._interview_id)
         self._save_txt_local(txt)
+
         self._notify_status("Ready")
         return export
 
     async def export_current(self) -> dict:
-        """Re-export the current meeting's transcript (for manual upload)."""
-        if self._meeting_id is None:
-            raise RuntimeError("No meeting to export")
-        export = await self._repo.export_transcript(self._meeting_id)
-        self._save_txt_local(await self._repo.export_txt(self._meeting_id))
-        return export
+        """Export the current interview's transcript as JSON."""
+        if self._interview_id is None:
+            raise RuntimeError("No interview to export")
+        return await self._repo.export_json(
+            self._interview_id,
+            model=f"whisper-{self._settings.whisper_model}",
+            language="en",
+        )
 
     def _save_txt_local(self, text: str) -> None:
         if not text.strip():
             return
-        dir_path = self._settings.output_dir / (self._meeting_id or "unknown")
+        dir_path = self._settings.output_dir / (self._interview_id or "unknown")
         dir_path.mkdir(parents=True, exist_ok=True)
         (dir_path / "transcript.txt").write_text(text, encoding="utf-8")
-
-    # ------------------------------------------------------------------
-    # transcription callback (worker thread)
-    # ------------------------------------------------------------------
-
-    def _on_transcription_segment(self, segment: TranscriptionSegment) -> None:
-        """Called from the transcription executor thread.
-
-        Timestamps are sample-count-based within one engine session,
-        so they're naturally meeting-relative with no offset needed.
-        """
-        log.debug("Transcription segment: \"%s\" [%.1f-%.1f]", segment.text, segment.start, segment.end)
-        with self._lock:
-            chunks = self._segment_builder.feed(segment)
-            for c in chunks:
-                c.meeting_id = self._meeting_id  # type: ignore[assignment]
-            self._pending_chunks.extend(chunks)
-            if chunks:
-                log.info("Emitted %d chunk(s): %s", len(chunks), [c.text[:50] for c in chunks])
-
-    # ------------------------------------------------------------------
-    # periodic persistence
-    # ------------------------------------------------------------------
-
-    async def _flush_loop(self) -> None:
-        """Persist pending chunks every 3 seconds while the meeting is active."""
-        while not self._flush_stop.is_set():  # type: ignore[union-attr]
-            try:
-                await asyncio.wait_for(
-                    self._flush_stop.wait(),  # type: ignore[union-attr]
-                    timeout=3.0,
-                )
-                break
-            except asyncio.TimeoutError:
-                await self._persist_pending()
-
-    async def _persist_pending(self) -> None:
-        with self._lock:
-            if not self._pending_chunks:
-                return
-            chunks = self._pending_chunks
-            self._pending_chunks = []
-
-        await self._repo.insert_chunks(chunks)
-        log.info("Persisted %d chunk(s) to DB", len(chunks))
-        if self.on_chunks_persisted:
-            self.on_chunks_persisted(chunks)
-
-    def _stop_flush_loop(self) -> None:
-        if self._flush_stop:
-            self._flush_stop.set()
-        if self._flush_task and not self._flush_task.done():
-            self._flush_task.cancel()
 
     def _notify_status(self, status: str) -> None:
         if self.on_status_change:
@@ -228,4 +157,3 @@ class MeetingController:
 from collections.abc import Callable
 
 StatusCallback = Callable[[str], None]
-ChunksCallback = Callable[[list[TranscriptChunk]], None]

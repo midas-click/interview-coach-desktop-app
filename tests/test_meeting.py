@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,109 +10,134 @@ import pytest
 
 from src.config.settings import Settings
 from src.meeting.controller import MeetingController
-from src.storage.models import MeetingStatus
+from src.storage.models import InterviewStatus
 from src.storage.repository import Repository
-from src.transcription.engine import TranscriptionSegment
 
-
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
 
 def _make_controller(tmp_path: Path) -> tuple[MeetingController, Repository, MagicMock, MagicMock]:
-    """Create a controller wired to a real Repository with mocked audio/engine."""
     db_path = tmp_path / "test.db"
     repo = Repository(db_path)
 
     async def _init():
         await repo.init()
-
     asyncio.run(_init())
 
-    settings = Settings(whisper_model="base")
+    settings = Settings(
+        whisper_model="base",
+        output_dir=tmp_path / "output",
+        temp_dir=tmp_path / "temp",
+    )
 
-    # mock AudioManager so no real audio hardware is needed
     with patch("src.meeting.controller.AudioManager") as mock_audio_cls, \
-         patch("src.meeting.controller.TranscriptionEngine") as mock_eng_cls:
+         patch("src.meeting.controller.TranscriptionEngine") as mock_eng_cls, \
+         patch("src.meeting.controller.TranscriptionWorker") as mock_worker_cls:
 
         mock_audio = mock_audio_cls.return_value
-        mock_audio.microphone_state.name = "STOPPED"
-        mock_audio.system_audio_state.name = "STOPPED"
-        mock_audio.is_any_running = False
-
-        mock_engine = mock_eng_cls.return_value
-        mock_engine.stop.return_value = []
+        mock_worker = mock_worker_cls.return_value
 
         ctrl = MeetingController(settings, repo)
-        return ctrl, repo, mock_audio, mock_engine
+        return ctrl, repo, mock_audio, mock_worker
 
 
-def _segment(text: str, start: float, end: float) -> TranscriptionSegment:
-    return TranscriptionSegment(text=text, start=start, end=end, confidence=0.9)
-
-
-# ---------------------------------------------------------------------------
-# tests
-# ---------------------------------------------------------------------------
-
-def test_create_meeting(tmp_path: Path) -> None:
+def test_create_interview(tmp_path: Path) -> None:
     ctrl, repo, _, _ = _make_controller(tmp_path)
 
     async def _test():
-        mid = await ctrl.create_meeting("Google", "System Design")
-        assert len(mid) == 12
-        meeting = await repo.get_meeting(mid)
-        assert meeting is not None
-        assert meeting.company_name == "Google"
-        assert meeting.interview_stage == "System Design"
+        mid = await ctrl.create_interview("Google", "System Design")
+        assert len(mid) == 36  # full UUID
+        interview = await repo._get_interview(mid)
+        assert interview is not None
+        assert interview.company == "Google"
+        assert interview.stage == "System Design"
+        assert interview.status == InterviewStatus.PENDING
 
     asyncio.run(_test())
 
 
 def test_full_lifecycle(tmp_path: Path) -> None:
-    ctrl, repo, mock_audio, mock_engine = _make_controller(tmp_path)
-
-    # capture the transcription callback when engine starts
-    engine_started = threading.Event()
-
-    def fake_start(audio_queue, on_segment):
-        mock_engine._on_segment = on_segment
-        engine_started.set()
-
-    mock_engine.start.side_effect = fake_start
+    ctrl, repo, mock_audio, mock_worker = _make_controller(tmp_path)
 
     async def _test():
-        await ctrl.create_meeting("Meta", "Coding")
-        mid = ctrl.meeting_id
+        mid = await ctrl.create_interview("Meta", "Coding")
 
-        # start
+        # Mock finish: no pending utterances
+        async def count_pending(interview_id):
+            return 0
+        repo.count_pending = count_pending
+
         await ctrl.start(mic_device=1)
-        assert engine_started.wait(2)
+        mock_audio.start.assert_called_once_with(mid, 1, None)
+        mock_worker.start.assert_called_once()
 
-        meeting = await repo.get_meeting(mid)
-        assert meeting is not None and meeting.status == MeetingStatus.ACTIVE
+        interview = await repo._get_interview(mid)
+        assert interview is not None and interview.status == InterviewStatus.ACTIVE
 
-        # simulate transcription segments
-        ctrl._on_transcription_segment(_segment("Tell me about yourself.", 1.0, 3.0))
-        ctrl._on_transcription_segment(_segment("I have 10 years of experience.", 4.0, 7.0))
-
-        # finish
         export = await ctrl.finish()
-        assert export["meetingId"] == mid
-        assert export["companyName"] == "Meta"
-        assert len(export["transcript"]) == 2
+        mock_audio.stop_all.assert_called_once()
+        mock_worker.stop.assert_called_once()
 
-        meeting = await repo.get_meeting(mid)
-        assert meeting is not None and meeting.status == MeetingStatus.FINISHED
+        assert export["interviewId"] == mid
+        assert export["schemaVersion"] == 1
+        assert export["company"] == "Meta"
 
     asyncio.run(_test())
 
 
-def test_start_without_meeting_raises(tmp_path: Path) -> None:
+def test_start_without_interview_raises(tmp_path: Path) -> None:
     ctrl, _, _, _ = _make_controller(tmp_path)
 
     async def _test():
-        with pytest.raises(RuntimeError, match="No meeting created"):
+        with pytest.raises(RuntimeError, match="No interview created"):
             await ctrl.start()
+
+    asyncio.run(_test())
+
+
+def test_export_json_format(tmp_path: Path) -> None:
+    ctrl, repo, _, _ = _make_controller(tmp_path)
+
+    async def _test():
+        mid = await ctrl.create_interview("Stripe", "Phone Screen")
+
+        # Insert a completed utterance directly
+        import sqlite3
+        conn = sqlite3.connect(repo.db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            "INSERT INTO utterances (interview_id, speaker, start_ms, end_ms, audio_path, status, confidence, transcript) "
+            "VALUES (?, 'interviewer', 1250, 21450, '/tmp/x.wav', 'completed', 0.98, 'Tell me about yourself.')",
+            (mid,),
+        )
+        conn.execute(
+            "INSERT INTO utterances (interview_id, speaker, start_ms, end_ms, audio_path, status, confidence, transcript) "
+            "VALUES (?, 'candidate', 21900, 61500, '/tmp/y.wav', 'completed', 0.96, 'Certainly. I have five years of experience.')",
+            (mid,),
+        )
+        conn.commit()
+        conn.close()
+
+        export = await ctrl.export_current()
+        assert export["schemaVersion"] == 1
+        assert export["interviewId"] == mid
+        assert export["company"] == "Stripe"
+        assert export["stage"] == "Phone Screen"
+        assert "transcriber" in export
+        assert export["transcriber"]["model"] == "whisper-base"
+        assert export["transcriber"]["language"] == "en"
+        assert "createdAt" in export["transcriber"]
+        assert len(export["utterances"]) == 2
+
+        u0 = export["utterances"][0]
+        assert u0["speaker"] == "interviewer"
+        assert u0["startMs"] == 1250
+        assert u0["endMs"] == 21450
+        assert u0["confidence"] == 0.98
+        assert u0["text"] == "Tell me about yourself."
+
+        u1 = export["utterances"][1]
+        assert u1["speaker"] == "candidate"
+        assert u1["startMs"] == 21900
+        assert u1["endMs"] == 61500
+        assert u1["confidence"] == 0.96
 
     asyncio.run(_test())
