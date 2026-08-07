@@ -1,7 +1,6 @@
-# Interview Transcriber
+# Notepadder — Real-time Interview Transcriber
 
-Real-time interview transcription for Windows. Captures microphone and system
-audio, transcribes with Whisper, persists to SQLite, and uploads to S3.
+Windows desktop application for capturing and transcribing live job interviews. Captures microphone and system audio, transcribes with Whisper, persists to SQLite, and uploads to S3 for the Interview Intelligence analysis pipeline.
 
 ## Architecture
 
@@ -62,7 +61,7 @@ audio, transcribes with Whisper, persists to SQLite, and uploads to S3.
 ```powershell
 # Clone
 git clone <repo-url>
-cd transcriber
+cd desktop-app
 
 # Create virtual environment
 python -m venv .venv
